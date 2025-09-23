@@ -190,6 +190,14 @@ function run_single_simulation(alpha::Float64, run_idx::Int, n_steps::Int,
             alpha_eff = 1.0 / denom
         end
 
+        # step-size-fixed
+        # alpha_eff = alpha
+        # if schedule == :theory
+        #     cval = isfinite(c_param) ? c_param : 1.0
+        #     denom = cval * max(phi_max_sq, 1e-12) * max(log(n_steps), 1.0) * log(n_steps + 3.0) * sqrt(n_steps + 1.0)
+        #     alpha_eff = 1.0 / denom
+        # end
+
         @inbounds @simd for j in 1:d
             vf.w[j] += alpha_eff * delta * Phi[s, j]
         end
