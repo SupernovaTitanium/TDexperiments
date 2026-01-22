@@ -4,10 +4,10 @@ Fast Julia implementation of semi-gradient TD(0) on a ToyExample MDP.
 
 ## Requirements
 
-- Julia 1.11
+- Julia 1.11 (current)
 - Optional for plots: PyPlot.jl
 
-Install PyPlot once if you want PNG plots:
+Install PyPlot once if you want EPS plots:
 
 ```
 julia -e "using Pkg; Pkg.add(\"PyPlot\")"
@@ -17,7 +17,7 @@ julia -e "using Pkg; Pkg.add(\"PyPlot\")"
 
 - `TDThreshold.jl`: Core types and algorithms 
 - `td_threshold_theory_sweep.jl`: CLI runner for theory-schedule c-sweep 
-- `plot_divergence.jl`: Reads CSVs, groups by eigen/omega, and generate plots.
+- `plot_divergence.jl`: Reads CSVs, groups by eigen/omega, and generates EPS plots.
 
 ## c-Sweep (theory schedule)
 
@@ -27,7 +27,6 @@ Run a c-sweep with decreasing step sizes (theory schedule):
 julia -t auto td_threshold_theory_sweep.jl --n_steps 10000000 --n_runs 48 
 
 ```
-
 
 
 
