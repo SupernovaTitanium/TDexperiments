@@ -24,7 +24,7 @@ julia -e "using Pkg; Pkg.add(\"PyPlot\")"
 Run a c-sweep with decreasing step sizes (theory schedule):
 
 ```
-julia -t auto td_threshold_theory_sweep.jl --n_steps 10000000 --n_runs 48 y
+julia -t auto td_threshold_theory_sweep.jl --n_steps 10000000 --n_runs 48 
 
 ```
 
