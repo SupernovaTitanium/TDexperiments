@@ -4,7 +4,7 @@ Fast Julia implementation of semi-gradient TD(0) on a ToyExample MDP.
 
 ## Requirements
 
-- Julia 1.11 (current)
+- Julia 1.11.8
 - Optional for plots: PyPlot.jl
 
 Install PyPlot once if you want EPS plots:
@@ -24,11 +24,11 @@ julia -e "using Pkg; Pkg.add(\"PyPlot\")"
 Run a c-sweep with decreasing step sizes (theory schedule):
 
 ```
-julia -t auto td_threshold_theory_sweep.jl --n_steps 10000000 --n_runs 48 
+julia -t auto td_threshold_theory_sweep.jl --n_steps 10000000 --n_runs 48 y
 
 ```
 
-
+Paper-ready c-sweep plots are saved under `<outdir>/plots` (default: `td_divergence_logs/<env>_<timestamp>/plots`), e.g. `toyexample__compact__rows-c.eps`.
 
 
 
