@@ -430,7 +430,7 @@ function plot_divergence(outdir::AbstractString)
         caption_latex = caption.latex
         caption_plain = caption.plain
         ax0.set_title(latexstring("$(caption_latex)~\\mathrm{ratio}"))
-        ax0.grid(true, alpha=0.3, which="both")
+        ax0.grid(true, alpha=1.0, which="both")
 
         # Plot 1: divergence rate
         ax2 = Base.invokelatest(plt.subplot, 1, 3, 2)
@@ -438,9 +438,9 @@ function plot_divergence(outdir::AbstractString)
         ax2.set_xscale("log")
         ax2.set_xlabel(xlabel_for(m.flist[1])); ax2.set_ylabel("Divergence Rate")
         ax2.set_title("Probability of Divergence")
-        ax2.grid(true, alpha=0.3, which="both")
+        ax2.grid(true, alpha=1.0, which="both")
         ax2.set_ylim(-0.05, 1.05)
-        ax2.axhline(y=0.5, color="gray", linestyle="--", alpha=0.7)
+        ax2.axhline(y=0.5, color="gray", linestyle="--", alpha=1.0)
 
         # Plot 3: Suboptimality gap
         ax3 = Base.invokelatest(plt.subplot, 1, 3, 3)
@@ -450,7 +450,7 @@ function plot_divergence(outdir::AbstractString)
         ax3.set_xscale("log"); ax3.set_yscale("log")
         ax3.set_xlabel(xlabel_for(m.flist[1])); ax3.set_ylabel(L"(1-\gamma)\,E[\| V_{\bar{\theta}_T} - V_{\theta^*} \|^2_D] + \gamma\,E[\| V_{\bar{\theta}_T} - V_{\theta^*} \|^2_{\mathrm{Dirichlet}}]")
         ax3.set_title("Suboptimality Gap")
-        ax3.grid(true, alpha=0.3, which="both")
+        ax3.grid(true, alpha=1.0, which="both")
         is_c = occursin("sched_theory", basename(m.flist[1]))
         xmin = is_c ? 1e-8 : 1e-6
         xmax = is_c ? 1e8  : 1
@@ -547,7 +547,7 @@ function plot_divergence(outdir::AbstractString)
             axL.set_xlabel(L"t")
             axL.set_ylabel(L"(1-\gamma)\,E[\| \bar V_{\bar{\theta}_t} - V_{\theta^*} \|^2_D]")
             axL.set_yscale("log")
-            axL.grid(true, alpha=0.3, which="both")
+            axL.grid(true, alpha=1.0, which="both")
             axL.legend(loc="best", fontsize=8, ncol=2)
             pkey = param_key_for(m.flist[1])
             om_sfx = omega_suffix(m.flist[1])
@@ -589,7 +589,7 @@ function plot_divergence(outdir::AbstractString)
             axLA.set_xlabel(L"t")
             axLA.set_ylabel(L"(1-\gamma)\,E[\| V_{\bar{\theta}_T} - V_{\theta^*} \|^2_D] + \gamma\,E[\| V_{\bar{\theta}_T} - V_{\theta^*} \|^2_{\mathrm{Dirichlet}}]")
             axLA.set_yscale("log")
-            axLA.grid(true, alpha=0.3, which="both")
+            axLA.grid(true, alpha=1.0, which="both")
             axLA.legend(loc="best", fontsize=8, ncol=2)
             axLA.set_ylim(Y_MIN_OBJ, Y_MAX_OBJ)
             axLA.set_xlim(0, max(m.T - 1, 1))
@@ -737,9 +737,9 @@ function plot_big_final_grid(outdir::AbstractString)
                 ax2.set_xlabel(sweeptype==:c ? L"c" : L"\alpha")
                 ax3.set_xlabel(sweeptype==:c ? L"c" : L"\alpha")
             end
-            ax.grid(true, alpha=0.3, which="both")
-            ax2.grid(true, alpha=0.3, which="both")
-            ax3.grid(true, alpha=0.3, which="both")
+            ax.grid(true, alpha=1.0, which="both")
+            ax2.grid(true, alpha=1.0, which="both")
+            ax3.grid(true, alpha=1.0, which="both")
 
             # Per-sweep default x-limits
             xmin = sweeptype==:c ? 1e-8 : 1e-6
@@ -846,7 +846,7 @@ function plot_compact_c_grid(outdir::AbstractString)
         ax_ratio.set_xscale("log"); ax_ratio.set_yscale("log")
         ax_ratio.set_ylim(Y_MIN_RATIO, Y_MAX_RATIO)
         ax_ratio.set_xlim(1e-8, 1e8)
-        ax_ratio.grid(true, alpha=0.3, which="both")
+        ax_ratio.grid(true, alpha=1.0, which="both")
         ax_ratio.set_ylabel(@sprintf("eigen=%2e\nkappa=%2e", lam, kap))
         if row_idx == 1
             ax_ratio.set_title("Ratio")
@@ -860,7 +860,7 @@ function plot_compact_c_grid(outdir::AbstractString)
         ax_div.set_xscale("log")
         ax_div.set_xlim(1e-8, 1e8)
         ax_div.set_ylim(-0.05, 1.05)
-        ax_div.grid(true, alpha=0.3, which="both")
+        ax_div.grid(true, alpha=1.0, which="both")
         if row_idx == 1
             ax_div.set_title("Divergence")
         end
@@ -873,7 +873,7 @@ function plot_compact_c_grid(outdir::AbstractString)
         ax_obj.set_xscale("log"); ax_obj.set_yscale("log")
         ax_obj.set_xlim(1e-8, 1e8)
         ax_obj.set_ylim(Y_MIN_OBJ, Y_MAX_OBJ)
-        ax_obj.grid(true, alpha=0.3, which="both")
+        ax_obj.grid(true, alpha=1.0, which="both")
         if row_idx == 1
             ax_obj.set_title("Suboptimality Gap")
         end
@@ -1006,7 +1006,7 @@ function plot_learning_curve_grid(outdir::AbstractString)
             end
         end
         ax.set_yscale("log")
-        ax.grid(true, alpha=0.3, which="both")
+        ax.grid(true, alpha=1.0, which="both")
         ax.set_xlabel("t", fontsize=9)
         ax.set_ylabel(L"(1-\gamma)\,E[\| V_{\bar{\theta}_t} - V_{\theta^*} \|^2_D]", fontsize=9)
         ax.set_ylim(CURVE_MIN_OBJ, CURVE_MAX_OBJ)
@@ -1042,7 +1042,7 @@ function plot_learning_curve_grid(outdir::AbstractString)
             end
         end
         ax.set_yscale("log")
-        ax.grid(true, alpha=0.3, which="both")
+        ax.grid(true, alpha=1.0, which="both")
         ax.set_xlabel("t", fontsize=9)
         ax.set_ylabel(L"(1-\gamma)\,E[\| V_{\bar{\theta}_t} - V_{\theta^*} \|^2_D] + \gamma\,E[\| V_{\bar{\theta}_t} - V_{\theta^*} \|^2_{\mathrm{Dirichlet}}]", fontsize=9)
         ax.set_ylim(CURVE_MIN_OBJ, CURVE_MAX_OBJ)
@@ -1179,7 +1179,7 @@ function plot_best_learning_curves_by_param(outdir::AbstractString; sweeptype::S
 
     ax.set_xscale("log"); ax.set_yscale("log")
     ax.set_ylim(CURVE_MIN_OBJ, CURVE_MAX_OBJ)
-    ax.grid(true, alpha=0.3, which="both")
+    ax.grid(true, alpha=1.0, which="both")
     ax.set_xlabel(L"time\ steps\ t")
     ax.set_ylabel(L"(1-\gamma)\,\mathbb{E}[\|\bar V_T - V^*\|^2_D] + \gamma\,\mathbb{E}[\|\bar V_T - V^*\|^2_{Dirichlet}]")
     ax.legend(loc="best", fontsize=8)

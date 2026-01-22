@@ -193,18 +193,20 @@ function main()
     # Plot synchronously (avoid world-age via invokelatest)
     try
         include(joinpath(@__DIR__, "plot_divergence.jl"))
-        Base.invokelatest(Main.plot_divergence, outdir)
+        if isdefined(Main, :plot_divergence)
+            Base.invokelatest(getfield(Main, :plot_divergence), outdir)
+        end
         if isdefined(Main, :plot_learning_curve_grid)
-            Base.invokelatest(Main.plot_learning_curve_grid, outdir)
+            Base.invokelatest(getfield(Main, :plot_learning_curve_grid), outdir)
         end
         if isdefined(Main, :plot_big_final_grid)
-            Base.invokelatest(Main.plot_big_final_grid, outdir)
+            Base.invokelatest(getfield(Main, :plot_big_final_grid), outdir)
         end
         if isdefined(Main, :plot_compact_c_grid)
-            Base.invokelatest(Main.plot_compact_c_grid, outdir)
+            Base.invokelatest(getfield(Main, :plot_compact_c_grid), outdir)
         end
         if isdefined(Main, :plot_best_learning_curves_c)
-            Base.invokelatest(Main.plot_best_learning_curves_c, outdir)
+            Base.invokelatest(getfield(Main, :plot_best_learning_curves_c), outdir)
         end
     catch e
         @warn "Plotting failed (install PyPlot and retry)" exception=(e, catch_backtrace())
