@@ -237,6 +237,7 @@ function read_aggregated_csv(path::AbstractString)
             max_std_theta = len >= 9  ? (try parse(Float64, p[9]) catch; NaN end) : NaN
             lambda_min    = len >= 10 ? (try parse(Float64, p[10]) catch; NaN end) : NaN
             kappa         = len >= 11 ? (try parse(Float64, p[11]) catch; NaN end) : NaN
+            gamma         = len >= 12 ? (try parse(Float64, p[12]) catch; NaN end) : NaN
             return (
                 t=parse(Int, p[1]),
                 avg_vbar=parse(Float64, p[2]),
@@ -248,7 +249,8 @@ function read_aggregated_csv(path::AbstractString)
                 std_vbar_A=std_vbar_A,
                 max_std_theta=max_std_theta,
                 lambda_min=lambda_min,
-                kappa=kappa
+                kappa=kappa,
+                gamma=gamma
             )
         end
         return parse_row(first), parse_row(last)
@@ -824,6 +826,11 @@ function plot_compact_c_grid(outdir::AbstractString)
             lam = isfinite(meta.eigen) ? meta.eigen : lam
             kap = isfinite(meta.kappa) ? meta.kappa : kap
             _, last = read_aggregated_csv(f)
+            lam = isfinite(last.lambda_min) ? last.lambda_min : lam
+            kap = isfinite(last.kappa) ? last.kappa : kap
+            if !isfinite(last.gamma)
+                error("gamma not found in aggregated CSV: $(basename(f)). Re-run td_threshold_theory_sweep.jl to include gamma column.")
+            end
             push!(params, meta.param)
             push!(ratio, sanitize_val(last.max_avg_theta / max(last.theta_star_norm, eps())))
             push!(objA, sanitize_val(getfield(last, :avg_vbar_A)))
@@ -847,7 +854,8 @@ function plot_compact_c_grid(outdir::AbstractString)
         ax_ratio.set_ylim(Y_MIN_RATIO, Y_MAX_RATIO)
         ax_ratio.set_xlim(1e-8, 1e8)
         ax_ratio.grid(true, alpha=1.0, which="both")
-        ax_ratio.set_ylabel(@sprintf("eigen=%2e\nkappa=%2e", lam, kap))
+        lam_display = lam / (1.0 - last.gamma)
+        ax_ratio.set_ylabel(latexstring(@sprintf("\\lambda_{\\min}(\\mathbf{\\Phi}^\\top \\mathbf{D}\\mathbf{\\Phi})=%.2e", lam_display)))
         if row_idx == 1
             ax_ratio.set_title("Ratio")
         end

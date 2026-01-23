@@ -136,14 +136,14 @@ function main()
             # Aggregated CSV (6 columns)
             aggfile = joinpath(outdir, @sprintf("alpha_%.2e_sched_theory_omega_%.6e_eigen_%.2e_kappa_%.2e.csv", cval, omega, lam, kappa))
             open(aggfile, "w") do io
-                println(io, "timestep,E_D[||Vbar_t - V*||^2],E_A[||Vbar_t - V*||^2],E[||theta_t||^2],max_i<=T ||theta_i||^2,||theta^*||^2,std_D,std_A,std_max_theta,lambda_min,kappa")       
+                println(io, "timestep,E_D[||Vbar_t - V*||^2],E_A[||Vbar_t - V*||^2],E[||theta_t||^2],max_i<=T ||theta_i||^2,||theta^*||^2,std_D,std_A,std_max_theta,lambda_min,kappa,gamma")       
                 t_temp=100      
                 for t in 1:cfg.n_steps
                     if t<=100
-                        @printf(io, "%d,%.12g,%.12g,%.12g,%.12g,%.12g,%.12g,%.12g,%.12g,%.12g,%.12g\n", t, agg.avg_vbar[t], agg.avg_vbar_A[t], agg.avg_theta_norms[t], agg.max_avg_theta, theta_star_sq, agg.std_vbar[t], agg.std_vbar_A[t], agg.max_std_theta, lam, kappa)
+                        @printf(io, "%d,%.12g,%.12g,%.12g,%.12g,%.12g,%.12g,%.12g,%.12g,%.12g,%.12g,%.12g\n", t, agg.avg_vbar[t], agg.avg_vbar_A[t], agg.avg_theta_norms[t], agg.max_avg_theta, theta_star_sq, agg.std_vbar[t], agg.std_vbar_A[t], agg.max_std_theta, lam, kappa, ref.gamma)
                     else 
                         if t > t_temp*10^0.01
-                            @printf(io, "%d,%.12g,%.12g,%.12g,%.12g,%.12g,%.12g,%.12g,%.12g,%.12g,%.12g\n", t, agg.avg_vbar[t], agg.avg_vbar_A[t], agg.avg_theta_norms[t], agg.max_avg_theta, theta_star_sq, agg.std_vbar[t], agg.std_vbar_A[t], agg.max_std_theta, lam, kappa)
+                            @printf(io, "%d,%.12g,%.12g,%.12g,%.12g,%.12g,%.12g,%.12g,%.12g,%.12g,%.12g,%.12g\n", t, agg.avg_vbar[t], agg.avg_vbar_A[t], agg.avg_theta_norms[t], agg.max_avg_theta, theta_star_sq, agg.std_vbar[t], agg.std_vbar_A[t], agg.max_std_theta, lam, kappa, ref.gamma)
                             t_temp = t
                         end
                     end

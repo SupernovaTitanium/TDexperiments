@@ -46,7 +46,7 @@ mutable struct ToyExampleMDP
     Phi::Matrix{Float64}
     theta_star::Vector{Float64}
     V_star::Vector{Float64}
-    r::Vector{Float64}
+    r::Matrix{Float64}
     rng::MersenneTwister
 end
 
@@ -71,7 +71,7 @@ function ToyExampleMDP(; gamma::Float64=0.9, seed::Int=114514, scale_factor::Flo
     Dm = Diagonal(D)
 
     # Sample reward first so the MDP is fixed before choosing features
-    r = rand(reward_rng, n_states)
+    r = rand(reward_rng, n_states, n_states)
 
     feature_rng = MersenneTwister(seed)
     Phi = rand(feature_rng, n_states, d)*10
@@ -80,9 +80,11 @@ function ToyExampleMDP(; gamma::Float64=0.9, seed::Int=114514, scale_factor::Flo
     else
         @views Phi[:, 1:end]  .*= scale_factor
     end
+    # Expected immediate reward per state: r̄(s) = Σ_{s'} P(s,s') r(s,s')
+    r_bar = vec(sum(P .* r, dims=2))
     M = I - gamma * P
     A = Phi' * Dm * M * Phi
-    b = Phi' * Dm * r
+    b = Phi' * Dm * r_bar
     theta_star = A \ b
     V_star = Phi * theta_star
 
@@ -99,10 +101,10 @@ end
     @inbounds for j in 1:length(p)
         c += p[j]
         if u <= c
-            return j, env.r[s] # reward depends only on current state
+            return j, env.r[s, j] # reward depends on (s, s_next)
         end
     end
-    return length(p), env.r[s] # fallback due to FP rounding
+    return length(p), env.r[s, length(p)] # fallback due to FP rounding
 end
 
 @inline phi(env::ToyExampleMDP, s::Int) = @view env.Phi[s, :]
@@ -135,7 +137,7 @@ function run_single_simulation(alpha::Float64, run_idx::Int, n_steps::Int,
     d = env.d
     gamma = env.gamma
     Phi = env.Phi
-    rvec = env.r
+    rmat = env.r
 
     # Initialize VF and running average theta_bar
     vf = LinearValueFunc(d)
@@ -180,7 +182,7 @@ function run_single_simulation(alpha::Float64, run_idx::Int, n_steps::Int,
             dot_phi      += wj * Phi[s, j]
             dot_phi_next += wj * Phi[s_next, j]
         end
-        delta = rvec[s] + gamma * dot_phi_next - dot_phi
+        delta = rmat[s, s_next] + gamma * dot_phi_next - dot_phi
 
         # step-size 
         alpha_eff = alpha
