@@ -92,15 +92,15 @@ function main()
     @printf "Using %d threads\n" Threads.nthreads()
     gamma_used = NaN
 
-    # Omegas like original sweep
-    omegas=Float64[]
+    # Feature scales like original sweep
+    scales=Float64[]
     for k in [-10,-8,-6,-4,-2,0,2,4,6,8,10]
-        push!(omegas, 2.0^k)
+        push!(scales, 2.0^k)
     end    
 
 
-    for omega in omegas
-        ref = TDThreshold.ToyExampleMDP(gamma=0.99, seed=114514, scale_factor=omega)
+    for scale in scales
+        ref = TDThreshold.ToyExampleMDP(gamma=0.99, seed=114514, scale_factor=scale)
         if !isfinite(gamma_used)
             gamma_used = ref.gamma
         end
@@ -122,7 +122,7 @@ function main()
 
         lam = minimum(eigvals(Symmetric(G)))
         kappa = maximum(eigvals(Symmetric(G))) / lam
-        @printf "Testing omega=%.3e (λmin=%.3e, κ=%.3e)\n" omega lam kappa
+        @printf "Testing scale=%.3e (λmin=%.3e, κ=%.3e)\n" scale lam kappa
 
         theta_star_sq = dot(ref.theta_star, ref.theta_star)
         theta0 = zeros(ref.d)
@@ -138,7 +138,7 @@ function main()
             agg = TDThreshold.aggregate_results(runs, cfg.n_steps)
 
             # Aggregated CSV (6 columns)
-            aggfile = joinpath(outdir, @sprintf("alpha_%.2e_sched_theory_omega_%.6e_eigen_%.2e_kappa_%.2e.csv", cval, omega, lam, kappa))
+            aggfile = joinpath(outdir, @sprintf("alpha_%.2e_sched_theory_scale_%.6e_eigen_%.2e_kappa_%.2e.csv", cval, scale, lam, kappa))
             open(aggfile, "w") do io
                 println(io, "timestep,E_D[||Vbar_t - V*||^2],E_A[||Vbar_t - V*||^2],E[||theta_t||^2],max_i<=T ||theta_i||^2,||theta^*||^2,std_D,std_A,std_max_theta,lambda_min,kappa,gamma")       
                 t_temp=100      
@@ -157,7 +157,7 @@ function main()
             # Per-run CSV
 
             temp_check= 100        
-            runfile = joinpath(outdir, @sprintf("alpha_%.2e_runs_sched_theory_omega_%.6e_eigen_%.2e_kappa_%.2e.csv", cval, omega, lam, kappa))
+            runfile = joinpath(outdir, @sprintf("alpha_%.2e_runs_sched_theory_scale_%.6e_eigen_%.2e_kappa_%.2e.csv", cval, scale, lam, kappa))
             open(runfile, "w") do io
                 println(io, "run_idx,diverged,diverged_at,(1-\\gamma)E[||\\bar V_T - V^*||^2_D],(1-\\gamma)E[||\\bar V_T - V^*||^2_D]+\\gamma E[||\\bar V_T - V^*||^2_{Dirichlet}],final_theta_norm,max_theta_norm,ratio_max_over_theta_star,theta_star_norm")
                 for r in runs
@@ -177,12 +177,12 @@ function main()
             end
         end
         # Ratio CSV across c
-        ratiofile = joinpath(outdir, @sprintf("ratio_omega_%.6e_eigen_%.2e_kappa_%.2e.csv", omega, lam, kappa))
+        ratiofile = joinpath(outdir, @sprintf("ratio_scale_%.6e_eigen_%.2e_kappa_%.2e.csv", scale, lam, kappa))
         open(ratiofile, "w") do io
             println(io, "eigen,param,max_i<=T ||theta_i||^2/||theta^*||^2")
             for cval in cfg.c_values
                 # read first row to get max_avg_theta and theta_star from aggregated file
-                aggfile = joinpath(outdir, @sprintf("alpha_%.2e_sched_theory_omega_%.6e_eigen_%.2e_kappa_%.2e.csv", cval, omega, lam, kappa))
+                aggfile = joinpath(outdir, @sprintf("alpha_%.2e_sched_theory_scale_%.6e_eigen_%.2e_kappa_%.2e.csv", cval, scale, lam, kappa))
                 open(aggfile, "r") do aio
                     _ = readline(aio)
                     first = readline(aio)

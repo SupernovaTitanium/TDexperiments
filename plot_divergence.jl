@@ -54,7 +54,7 @@ const Y_MAX_RATIO  = 1e12
 # Cap extremely large/invalid values when plotting to avoid Inf/NaN on log axes
 const PLOT_CAP_VALUE = 1e24
 
-const COMPACT_OMEGA_TARGETS = (2^-5, 2^4, 2^10)
+const COMPACT_SCALE_TARGETS = (2^-4, 2^0, 2^4)
 
 function lambda_caption(lam::Float64, kappa::Float64)
     lam_str = @sprintf("%.3e", lam)
@@ -131,10 +131,10 @@ function parse_alpha_filename(path::AbstractString)
     base = splitext(basename(path))[1]
     parts = split(base, "_")
     if length(parts) < 2 || parts[1] != "alpha"
-        return (param=NaN, omega=NaN, eigen=NaN, kappa=NaN, is_sched=false, has_runs=false)
+        return (param=NaN, scale=NaN, eigen=NaN, kappa=NaN, is_sched=false, has_runs=false)
     end
     param = try parse(Float64, parts[2]) catch; NaN end
-    omega = NaN
+    scale = NaN
     eigen = NaN
     kappa = NaN
     is_sched = false
@@ -148,8 +148,12 @@ function parse_alpha_filename(path::AbstractString)
         elseif token == "sched" && i + 1 <= length(parts) && parts[i+1] == "theory"
             is_sched = true
             i += 2
+        elseif token == "scale" && i + 1 <= length(parts)
+            scale = try parse(Float64, parts[i+1]) catch; NaN end
+            i += 2
         elseif token == "omega" && i + 1 <= length(parts)
-            omega = try parse(Float64, parts[i+1]) catch; NaN end
+            # backward compatibility for older filenames
+            scale = try parse(Float64, parts[i+1]) catch; NaN end
             i += 2
         elseif token == "eigen" && i + 1 <= length(parts)
             eigen = try parse(Float64, parts[i+1]) catch; NaN end
@@ -161,7 +165,7 @@ function parse_alpha_filename(path::AbstractString)
             i += 1
         end
     end
-    return (param=param, omega=omega, eigen=eigen, kappa=kappa, is_sched=is_sched, has_runs=has_runs)
+    return (param=param, scale=scale, eigen=eigen, kappa=kappa, is_sched=is_sched, has_runs=has_runs)
 end
 
 function find_runs_csv(path::AbstractString)
@@ -170,11 +174,14 @@ function find_runs_csv(path::AbstractString)
     candidates = String[]
     if meta.is_sched
         if isfinite(meta.kappa)
-            push!(candidates, @sprintf("alpha_%.2e_runs_sched_theory_omega_%.6e_eigen_%.2e_kappa_%.2e.csv", meta.param, meta.omega, meta.eigen, meta.kappa))
+            push!(candidates, @sprintf("alpha_%.2e_runs_sched_theory_scale_%.6e_eigen_%.2e_kappa_%.2e.csv", meta.param, meta.scale, meta.eigen, meta.kappa))
+            push!(candidates, @sprintf("alpha_%.2e_runs_sched_theory_omega_%.6e_eigen_%.2e_kappa_%.2e.csv", meta.param, meta.scale, meta.eigen, meta.kappa))
         end
-        push!(candidates, @sprintf("alpha_%.2e_runs_sched_theory_omega_%.6e_eigen_%.2e.csv", meta.param, meta.omega, meta.eigen))
+        push!(candidates, @sprintf("alpha_%.2e_runs_sched_theory_scale_%.6e_eigen_%.2e.csv", meta.param, meta.scale, meta.eigen))
+        push!(candidates, @sprintf("alpha_%.2e_runs_sched_theory_omega_%.6e_eigen_%.2e.csv", meta.param, meta.scale, meta.eigen))
     else
-        push!(candidates, @sprintf("alpha_%.2e_runs_omega_%.6e_eigen_%.2e.csv", meta.param, meta.omega, meta.eigen))
+        push!(candidates, @sprintf("alpha_%.2e_runs_scale_%.6e_eigen_%.2e.csv", meta.param, meta.scale, meta.eigen))
+        push!(candidates, @sprintf("alpha_%.2e_runs_omega_%.6e_eigen_%.2e.csv", meta.param, meta.scale, meta.eigen))
     end
     for name in candidates
         full = joinpath(base_dir, name)
@@ -288,8 +295,8 @@ function plot_divergence(outdir::AbstractString)
     fallback = Dict{Float64, Vector{String}}()
     for f in files
         meta = parse_alpha_filename(f)
-        if isfinite(meta.omega)
-            push!(get!(groups, meta.omega, String[]), f)
+        if isfinite(meta.scale)
+            push!(get!(groups, meta.scale, String[]), f)
         elseif isfinite(meta.eigen)
             push!(get!(fallback, meta.eigen, String[]), f)
         end
@@ -370,6 +377,9 @@ function plot_divergence(outdir::AbstractString)
         return
     end
 
+    gamma_env = get(ENV, "PLOT_GAMMA", "")
+    gamma_env_val = try parse(Float64, gamma_env) catch; NaN end
+
     plt = plt_global
 
   
@@ -403,10 +413,10 @@ function plot_divergence(outdir::AbstractString)
         return occursin("sched_theory", base) ? "c" : "alpha"
     end
 
-    omega_suffix = function(path::AbstractString)
+    scale_suffix = function(path::AbstractString)
         meta = parse_alpha_filename(path)
-        if isfinite(meta.omega)
-            return @sprintf("__omega-%.3e", meta.omega)
+        if isfinite(meta.scale)
+            return @sprintf("__scale-%.3e", meta.scale)
         else
             return ""
         end
@@ -479,8 +489,8 @@ function plot_divergence(outdir::AbstractString)
         plt.suptitle(@sprintf("%s: Final Time Analysis; T=%d)", uppercase(env_name), m.T), fontsize=16)
         plt.tight_layout()
         pkey = param_key_for(m.flist[1])
-        om_sfx = omega_suffix(m.flist[1])
-        outpng = joinpath(plot_dir, @sprintf("%s__final__x-%s__eig-%.3e%s.eps", env_name, pkey, lam, om_sfx))
+        sc_sfx = scale_suffix(m.flist[1])
+        outpng = joinpath(plot_dir, @sprintf("%s__final__x-%s__eig-%.3e%s.eps", env_name, pkey, lam, sc_sfx))
         _safe_savefig(plt, outpng)
         Base.invokelatest(plt.close)
         println()
@@ -556,10 +566,10 @@ function plot_divergence(outdir::AbstractString)
             axL.grid(true, alpha=1.0, which="both")
             axL.legend(loc="best", fontsize=8, ncol=2)
             pkey = param_key_for(m.flist[1])
-            om_sfx = omega_suffix(m.flist[1])
+            sc_sfx = scale_suffix(m.flist[1])
             axL.set_ylim(CURVE_MIN_OBJ, CURVE_MAX_OBJ)
             axL.set_xlim(0, max(m.T - 1, 1))
-            outpng2 = joinpath(plot_dir, @sprintf("%s__curves__obj-A=(1-gamma)D__x-t__param-%s__eig-%.3e%s.eps", env_name, pkey, lam, om_sfx))
+            outpng2 = joinpath(plot_dir, @sprintf("%s__curves__obj-A=(1-gamma)D__x-t__param-%s__eig-%.3e%s.eps", env_name, pkey, lam, sc_sfx))
             _safe_savefig(plt, outpng2)
             Base.invokelatest(plt.close)
             println(@sprintf("  - %s: Learning curves per eigen (<= 2 alphas per decade)", basename(outpng2)))
@@ -599,7 +609,7 @@ function plot_divergence(outdir::AbstractString)
             axLA.legend(loc="best", fontsize=8, ncol=2)
             axLA.set_ylim(Y_MIN_OBJ, Y_MAX_OBJ)
             axLA.set_xlim(0, max(m.T - 1, 1))
-            outpngA2 = joinpath(plot_dir, @sprintf("%s__curves__obj-A=(1-gamma)D+gammaS__x-t__param-%s__eig-%.3e%s.eps", env_name, pkey, lam, om_sfx))
+            outpngA2 = joinpath(plot_dir, @sprintf("%s__curves__obj-A=(1-gamma)D+gammaS__x-t__param-%s__eig-%.3e%s.eps", env_name, pkey, lam, sc_sfx))
             _safe_savefig(plt, outpngA2)
             Base.invokelatest(plt.close)
             println(@sprintf("  - %s: Learning curves (A) per eigen (<= 2 alphas per decade)", basename(outpngA2)))
@@ -635,7 +645,7 @@ function plot_big_final_grid(outdir::AbstractString)
     # Parse tokens from filenames
     function parse_tokens(path::AbstractString)
         meta = parse_alpha_filename(path)
-        return meta.param, meta.omega, meta.eigen, meta.kappa, meta.is_sched
+        return meta.param, meta.scale, meta.eigen, meta.kappa, meta.is_sched
     end
 
 
@@ -765,22 +775,19 @@ function plot_compact_c_grid(outdir::AbstractString; gamma_override::Union{Nothi
     if !HAVE_PYPLOT
         return
     end
-    targets = (2^-4, 2^0, 2^4)
-    gamma_env = get(ENV, "PLOT_GAMMA", "")
-    gamma_env_val = try parse(Float64, gamma_env) catch; NaN end
-
+    targets = COMPACT_SCALE_TARGETS
     plt = plt_global
     files = filter(f->occursin("alpha_", f) && occursin("sched_theory", f) && endswith(f, ".csv") && !occursin("_runs_", f) && !occursin("ratio_", f), readdir(outdir; join=true))
     isempty(files) && return
 
-    by_omega = Dict{Float64, Vector{String}}()
+    by_scale = Dict{Float64, Vector{String}}()
     for f in files
         meta = parse_alpha_filename(f)
-        if isfinite(meta.omega)
-            push!(get!(by_omega, meta.omega, String[]), f)
+        if isfinite(meta.scale)
+            push!(get!(by_scale, meta.scale, String[]), f)
         end
     end
-    isempty(by_omega) && return
+    isempty(by_scale) && return
 
     selected = Vector{Tuple{Float64, Vector{String}}}()
     used = Set{Float64}()
@@ -788,16 +795,16 @@ function plot_compact_c_grid(outdir::AbstractString; gamma_override::Union{Nothi
         best_key = nothing
         best_gap = Inf
         target > 0 || continue
-        for (omega, flist) in by_omega
-            omega > 0 || continue
-            gap = abs(log(target) - log(omega))
+        for (scale, flist) in by_scale
+            scale > 0 || continue
+            gap = abs(log(target) - log(scale))
             if gap < best_gap
                 best_gap = gap
-                best_key = omega
+                best_key = scale
             end
         end
         if best_key !== nothing && !(best_key in used)
-            push!(selected, (best_key, copy(by_omega[best_key])))
+            push!(selected, (best_key, copy(by_scale[best_key])))
             push!(used, best_key)
         end
     end
@@ -823,17 +830,19 @@ function plot_compact_c_grid(outdir::AbstractString; gamma_override::Union{Nothi
     fig = Base.invokelatest(plt.figure)
     fig.set_size_inches(5.0*ncols, max(2.5*nrows, 3.0))
 
-    for (row_idx, (omega, flist)) in enumerate(selected)
+    for (row_idx, (scale, flist)) in enumerate(selected)
         sort!(flist, by = f -> parse_alpha_filename(f).param)
         params = Float64[]; ratio = Float64[]; diver = Float64[]; objA = Float64[]
-        lam = NaN; kap = NaN; gamma_val = NaN
+        lam = NaN
+        gamma_val = NaN
         for f in flist
             meta = parse_alpha_filename(f)
-            lam = isfinite(meta.eigen) ? meta.eigen : lam
-            kap = isfinite(meta.kappa) ? meta.kappa : kap
             _, last = read_aggregated_csv(f)
-            lam = isfinite(last.lambda_min) ? last.lambda_min : lam
-            kap = isfinite(last.kappa) ? last.kappa : kap
+            if isfinite(last.lambda_min)
+                lam = last.lambda_min
+            elseif isfinite(meta.eigen)
+                lam = meta.eigen
+            end
             if hasproperty(last, :gamma) && isfinite(getfield(last, :gamma))
                 gamma_val = getfield(last, :gamma)
             elseif gamma_override !== nothing && isfinite(gamma_override)
@@ -852,9 +861,6 @@ function plot_compact_c_grid(outdir::AbstractString; gamma_override::Union{Nothi
                 push!(diver, NaN)
             end
         end
-        lam_label = @sprintf("%.3e", lam)
-        cap =  @sprintf("%.3e", kap)
-
         ax_ratio = Base.invokelatest(plt.subplot, nrows, ncols, (row_idx-1)*ncols + 1)
         xr, yr = valid_xy(params, ratio)
         if !isempty(xr)
@@ -867,8 +873,11 @@ function plot_compact_c_grid(outdir::AbstractString; gamma_override::Union{Nothi
         if !isfinite(gamma_val)
             error("gamma not found. Re-run td_threshold_theory_sweep.jl to include gamma column, or pass gamma_override / set PLOT_GAMMA.")
         end
+        if !isfinite(lam)
+            error("lambda_min not found in aggregated CSV or filename.")
+        end
         lam_display = lam / (1.0 - gamma_val)
-        ax_ratio.set_ylabel(latexstring(@sprintf("\\lambda_{\\min}(\\mathbf{\\Phi}^\\top \\mathbf{D}\\mathbf{\\Phi})=%.2e", lam_display)))
+        ax_ratio.set_ylabel(latexstring(@sprintf("\\omega=%.2e", lam_display)))
         if row_idx == 1
             ax_ratio.set_title("Ratio")
         end
@@ -925,10 +934,10 @@ function plot_learning_curve_grid(outdir::AbstractString)
     files = filter(f->occursin("alpha_", f) && endswith(f, ".csv") && !occursin("_runs_", f), readdir(outdir; join=true))
     isempty(files) && error("No aggregated alpha_*.csv files found in $outdir")
 
-    # Local parser for alpha/omega/eigen from filename
+    # Local parser for alpha/scale/eigen from filename
     function parse_alpha_param(path)
         meta = parse_alpha_filename(path)
-        return meta.param, meta.omega, meta.eigen, meta.kappa
+        return meta.param, meta.scale, meta.eigen, meta.kappa
     end
 
     # Select at most 2 alphas per decade bucket
@@ -1107,7 +1116,7 @@ function plot_best_learning_curves_by_param(outdir::AbstractString; sweeptype::S
     parse_param_lam = function(path::AbstractString)
         base = split(basename(path), ".csv")[1]
         parts = split(base, "_")
-        # pattern: alpha_<val>[_sched_theory]_omega_<val>_eigen_<lam>
+        # pattern: alpha_<val>[_sched_theory]_scale_<val>_eigen_<lam>
         pval = parse(Float64, parts[2])
         lam  = parse(Float64, parts[end-2])
         return pval, lam

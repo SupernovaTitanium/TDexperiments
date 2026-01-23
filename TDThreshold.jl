@@ -231,8 +231,7 @@ function run_single_simulation(alpha::Float64, run_idx::Int, n_steps::Int,
         end
         vbarA = qA - 2.0 * dot(theta_bar, b_A) + c_A
 
-        vbarA = gamma * vbarA
-        vbar = (1.0 - gamma) * vbar 
+        # vbar uses A1=(1-γ)D, vbarA uses A2=(1-γ)D+γS; no extra scaling needed
 
         theta_n2 = 0.0
         @inbounds @simd for j in 1:d
