@@ -50,7 +50,7 @@ mutable struct ToyExampleMDP
     rng::MersenneTwister
 end
 
-function ToyExampleMDP(; gamma::Float64=0.9, seed::Int=114514, scale_factor::Float64=1.0)
+function ToyExampleMDP(; gamma::Float64=0.99, seed::Int=114514, scale_factor::Float64=1.0)
     n_states = 50
     d = 5
 

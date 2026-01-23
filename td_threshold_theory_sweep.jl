@@ -90,6 +90,7 @@ function main()
     isdir(outdir) || mkpath(outdir)
 
     @printf "Using %d threads\n" Threads.nthreads()
+    gamma_used = NaN
 
     # Omegas like original sweep
     omegas=Float64[]
@@ -100,6 +101,9 @@ function main()
 
     for omega in omegas
         ref = TDThreshold.ToyExampleMDP(gamma=0.99, seed=114514, scale_factor=omega)
+        if !isfinite(gamma_used)
+            gamma_used = ref.gamma
+        end
 
         # Build A1=(1-γ)D and A2=A1+γS
         Dm = Diagonal(ref.D)
@@ -203,7 +207,7 @@ function main()
             Base.invokelatest(getfield(Main, :plot_big_final_grid), outdir)
         end
         if isdefined(Main, :plot_compact_c_grid)
-            Base.invokelatest(getfield(Main, :plot_compact_c_grid), outdir)
+            Base.invokelatest(getfield(Main, :plot_compact_c_grid), outdir; gamma_override=gamma_used)
         end
         if isdefined(Main, :plot_best_learning_curves_c)
             Base.invokelatest(getfield(Main, :plot_best_learning_curves_c), outdir)

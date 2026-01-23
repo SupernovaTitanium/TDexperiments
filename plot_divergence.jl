@@ -192,6 +192,7 @@ Usage: julia $scr --dir <output_dir>
 
 Options:
   --dir <Str>       results directory to plot (e.g., td_divergence_logs/toyexample_YYYYMMDD_HHMMSS)
+  --gamma <Float>   override gamma when not in CSV (used for compact plot)
   -h, --help        show this help and exit
 """)
 end
@@ -199,6 +200,7 @@ end
 
 function parse_args(args)
     dir = nothing
+    gamma_override = nothing
     i = 1
     while i <= length(args)
         arg = args[i]
@@ -206,6 +208,8 @@ function parse_args(args)
             print_help(); exit(0)
         elseif arg == "--dir" && i < length(args)
             dir = args[i+1]; i += 2; continue
+        elseif arg == "--gamma" && i < length(args)
+            gamma_override = parse(Float64, args[i+1]); i += 2; continue
         else
             @printf "Unknown or incomplete arg: %s\n" arg
             i += 1
@@ -214,7 +218,7 @@ function parse_args(args)
     if dir === nothing
         error("Usage: julia plot_divergence.jl --dir <output_dir>")
     end
-    return dir
+    return (dir=dir, gamma_override=gamma_override)
 end
 
 
@@ -757,11 +761,13 @@ function plot_big_final_grid(outdir::AbstractString)
     end
 end
 
-function plot_compact_c_grid(outdir::AbstractString)
+function plot_compact_c_grid(outdir::AbstractString; gamma_override::Union{Nothing,Float64}=nothing)
     if !HAVE_PYPLOT
         return
     end
     targets = (2^-4, 2^0, 2^4)
+    gamma_env = get(ENV, "PLOT_GAMMA", "")
+    gamma_env_val = try parse(Float64, gamma_env) catch; NaN end
 
     plt = plt_global
     files = filter(f->occursin("alpha_", f) && occursin("sched_theory", f) && endswith(f, ".csv") && !occursin("_runs_", f) && !occursin("ratio_", f), readdir(outdir; join=true))
@@ -820,7 +826,7 @@ function plot_compact_c_grid(outdir::AbstractString)
     for (row_idx, (omega, flist)) in enumerate(selected)
         sort!(flist, by = f -> parse_alpha_filename(f).param)
         params = Float64[]; ratio = Float64[]; diver = Float64[]; objA = Float64[]
-        lam = NaN; kap = NaN
+        lam = NaN; kap = NaN; gamma_val = NaN
         for f in flist
             meta = parse_alpha_filename(f)
             lam = isfinite(meta.eigen) ? meta.eigen : lam
@@ -828,8 +834,12 @@ function plot_compact_c_grid(outdir::AbstractString)
             _, last = read_aggregated_csv(f)
             lam = isfinite(last.lambda_min) ? last.lambda_min : lam
             kap = isfinite(last.kappa) ? last.kappa : kap
-            if !isfinite(last.gamma)
-                error("gamma not found in aggregated CSV: $(basename(f)). Re-run td_threshold_theory_sweep.jl to include gamma column.")
+            if hasproperty(last, :gamma) && isfinite(getfield(last, :gamma))
+                gamma_val = getfield(last, :gamma)
+            elseif gamma_override !== nothing && isfinite(gamma_override)
+                gamma_val = gamma_override
+            elseif isfinite(gamma_env_val)
+                gamma_val = gamma_env_val
             end
             push!(params, meta.param)
             push!(ratio, sanitize_val(last.max_avg_theta / max(last.theta_star_norm, eps())))
@@ -854,7 +864,10 @@ function plot_compact_c_grid(outdir::AbstractString)
         ax_ratio.set_ylim(Y_MIN_RATIO, Y_MAX_RATIO)
         ax_ratio.set_xlim(1e-8, 1e8)
         ax_ratio.grid(true, alpha=1.0, which="both")
-        lam_display = lam / (1.0 - last.gamma)
+        if !isfinite(gamma_val)
+            error("gamma not found. Re-run td_threshold_theory_sweep.jl to include gamma column, or pass gamma_override / set PLOT_GAMMA.")
+        end
+        lam_display = lam / (1.0 - gamma_val)
         ax_ratio.set_ylabel(latexstring(@sprintf("\\lambda_{\\min}(\\mathbf{\\Phi}^\\top \\mathbf{D}\\mathbf{\\Phi})=%.2e", lam_display)))
         if row_idx == 1
             ax_ratio.set_title("Ratio")
@@ -1203,7 +1216,8 @@ plot_best_learning_curves_alpha(outdir::AbstractString) = plot_best_learning_cur
 plot_best_learning_curves_c(outdir::AbstractString)     = plot_best_learning_curves_by_param(outdir; sweeptype=:c)
 
 if abspath(PROGRAM_FILE) == @__FILE__
-    outdir = parse_args(ARGS)
+    cfg = parse_args(ARGS)
+    outdir = cfg.dir
     plot_divergence(outdir)
     try
         plot_learning_curve_grid(outdir)
@@ -1211,7 +1225,7 @@ if abspath(PROGRAM_FILE) == @__FILE__
             plot_big_final_grid(outdir)
         end
         if isdefined(Main, :plot_compact_c_grid)
-            plot_compact_c_grid(outdir)
+            plot_compact_c_grid(outdir; gamma_override=cfg.gamma_override)
         end
     catch e
         @warn "Learning-curves grid failed" exception=(e, catch_backtrace())
