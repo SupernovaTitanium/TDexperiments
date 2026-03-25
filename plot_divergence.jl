@@ -1,7 +1,6 @@
 #!/usr/bin/env julia
 
 using Printf
-using Dates
 using LaTeXStrings
 
 ENV["MPLBACKEND"] = get(ENV, "MPLBACKEND", "Agg")
@@ -16,21 +15,24 @@ end
 
 if HAVE_PYPLOT
     const plt_global = PyPlot
-    # Default to not using external LaTeX to avoid environment issues.
     use_tex = get(ENV, "PLOT_USE_TEX", "0") == "1"
     try
         plt_global.rc("text", usetex=use_tex)
         if use_tex
             plt_global.rc("font", family="serif")
-            try
-                plt_global.rc("text.latex.preamble", "\\usepackage{amsmath}\\usepackage{amssymb}")
-            catch
-            end
         end
     catch
         plt_global.rc("text", usetex=false)
     end
 end
+
+const Y_MIN_OBJ = 1e-6
+const Y_MAX_OBJ = 1e12
+const Y_MIN_RATIO = 1e-6
+const Y_MAX_RATIO = 1e12
+const CURVE_MIN_OBJ = 1e-6
+const CURVE_MAX_OBJ = 1e12
+const PLOT_CAP_VALUE = 1e24
 
 function _safe_savefig(plt, path::AbstractString)
     try
@@ -44,66 +46,28 @@ function _safe_savefig(plt, path::AbstractString)
         end
     end
 end
-# Plot ranges and clamping helpers
-const Y_MIN_OBJ    = 1e-6        
-const Y_MAX_OBJ    = 1e12
-const CURVE_MIN_OBJ = 1e-6       
-const CURVE_MAX_OBJ = 1e12
-const Y_MIN_RATIO  = 1e-6
-const Y_MAX_RATIO  = 1e12
-# Cap extremely large/invalid values when plotting to avoid Inf/NaN on log axes
-const PLOT_CAP_VALUE = 1e24
 
-const COMPACT_SCALE_TARGETS = (2^-4, 2^0, 2^4)
-
-function lambda_caption(lam::Float64, kappa::Float64)
-    lam_str = @sprintf("%.3e", lam)
-    if isfinite(kappa)
-        kap_str = @sprintf("%.3e", kappa)
-        latex = "\\lambda = $(lam_str),\\, \\kappa = $(kap_str)"
-        plain = @sprintf("lambda=%s, kappa=%s", lam_str, kap_str)
-    else
-        latex = "\\lambda = $(lam_str)"
-        plain = @sprintf("lambda=%s", lam_str)
-    end
-    return (latex=latex, plain=plain)
-end
-
+sanitize_val(v::Float64) = !isfinite(v) ? PLOT_CAP_VALUE : min(v, PLOT_CAP_VALUE)
 
 function clamp_vec(y::AbstractVector, ymin::Float64, ymax::Float64)
-    out = similar(y)
+    out = similar(y, Float64)
     @inbounds for i in eachindex(y)
-        v = y[i]
-        if !isfinite(v)
-            v = ymax
-        end
+        v = sanitize_val(float(y[i]))
         if v <= 0 && ymin > 0
             v = ymin
         end
-        v = min(max(v, ymin), ymax)
-        out[i] = v
+        out[i] = min(max(v, ymin), ymax)
     end
     return out
 end
 
-# Globally available sanitizer for plotting on log axes.
-function sanitize_val(v::Float64)
-    if !isfinite(v)
-        return PLOT_CAP_VALUE
-    elseif v > PLOT_CAP_VALUE
-        return PLOT_CAP_VALUE
-    else
-        return v
-    end
-end
-
-# Filter x,y pairs for log-scale plotting: keep finite and strictly positive entries.
 function valid_xy(x::AbstractVector{<:Real}, y::AbstractVector{<:Real})
+    xx = Float64[]
+    yy = Float64[]
     n = min(length(x), length(y))
-    xx = Float64[]; yy = Float64[]
     @inbounds for i in 1:n
-        xi = float(x[i]); yi = float(y[i])
-        yi = sanitize_val(yi)
+        xi = float(x[i])
+        yi = sanitize_val(float(y[i]))
         if isfinite(xi) && isfinite(yi) && xi > 0 && yi > 0
             push!(xx, xi)
             push!(yy, yi)
@@ -112,31 +76,32 @@ function valid_xy(x::AbstractVector{<:Real}, y::AbstractVector{<:Real})
     return xx, yy
 end
 
-# Filter pairs by positive x and within [xmin, xmax].
-function filter_xy_xrange(x::AbstractVector{<:Real}, y::AbstractVector{<:Real}, xmin::Real, xmax::Real)
-    n = min(length(x), length(y))
-    xx = Float64[]; yy = Float64[]
-    @inbounds for i in 1:n
-        xi = float(x[i]); yi = float(y[i])
-        yi = sanitize_val(yi)
-        if isfinite(xi) && isfinite(yi) && xi > 0 && xi >= xmin && xi <= xmax
-            push!(xx, xi)
-            push!(yy, yi)
-        end
+function short_label(s::AbstractString; maxlen::Int=64)
+    text = replace(String(s), '\t' => ' ')
+    if lastindex(text) <= maxlen
+        return text
     end
-    return xx, yy
+    return string(first(text, maxlen - 3), "...")
+end
+
+function slugify(s::AbstractString)
+    text = lowercase(strip(String(s)))
+    text = replace(text, ' ' => '-', '|' => '-', '=' => '-', ',' => '-', ';' => '-', '/' => '-', '\\' => '-')
+    text = replace(text, "--" => "-")
+    return strip(text, '-')
 end
 
 function parse_alpha_filename(path::AbstractString)
     base = splitext(basename(path))[1]
     parts = split(base, "_")
     if length(parts) < 2 || parts[1] != "alpha"
-        return (param=NaN, scale=NaN, eigen=NaN, kappa=NaN, is_sched=false, has_runs=false)
+        return (param=NaN, scale=NaN, eigen=NaN, kappa=NaN, case_id="", is_sched=false, has_runs=false)
     end
     param = try parse(Float64, parts[2]) catch; NaN end
     scale = NaN
     eigen = NaN
     kappa = NaN
+    case_id = ""
     is_sched = false
     has_runs = false
     i = 3
@@ -145,33 +110,38 @@ function parse_alpha_filename(path::AbstractString)
         if token == "runs"
             has_runs = true
             i += 1
-        elseif token == "sched" && i + 1 <= length(parts) && parts[i+1] == "theory"
+        elseif token == "sched" && i + 1 <= length(parts) && parts[i + 1] == "theory"
             is_sched = true
             i += 2
         elseif token == "scale" && i + 1 <= length(parts)
-            scale = try parse(Float64, parts[i+1]) catch; NaN end
+            scale = try parse(Float64, parts[i + 1]) catch; NaN end
             i += 2
         elseif token == "omega" && i + 1 <= length(parts)
-            # backward compatibility for older filenames
-            scale = try parse(Float64, parts[i+1]) catch; NaN end
+            scale = try parse(Float64, parts[i + 1]) catch; NaN end
             i += 2
         elseif token == "eigen" && i + 1 <= length(parts)
-            eigen = try parse(Float64, parts[i+1]) catch; NaN end
+            eigen = try parse(Float64, parts[i + 1]) catch; NaN end
             i += 2
         elseif token == "kappa" && i + 1 <= length(parts)
-            kappa = try parse(Float64, parts[i+1]) catch; NaN end
+            kappa = try parse(Float64, parts[i + 1]) catch; NaN end
+            i += 2
+        elseif token == "case" && i + 1 <= length(parts)
+            case_id = parts[i + 1]
             i += 2
         else
             i += 1
         end
     end
-    return (param=param, scale=scale, eigen=eigen, kappa=kappa, is_sched=is_sched, has_runs=has_runs)
+    return (param=param, scale=scale, eigen=eigen, kappa=kappa, case_id=case_id, is_sched=is_sched, has_runs=has_runs)
 end
 
 function find_runs_csv(path::AbstractString)
     meta = parse_alpha_filename(path)
     base_dir = dirname(path)
     candidates = String[]
+    if !isempty(meta.case_id)
+        push!(candidates, @sprintf("alpha_%.2e_runs_sched_theory_case_%s.csv", meta.param, meta.case_id))
+    end
     if meta.is_sched
         if isfinite(meta.kappa)
             push!(candidates, @sprintf("alpha_%.2e_runs_sched_theory_scale_%.6e_eigen_%.2e_kappa_%.2e.csv", meta.param, meta.scale, meta.eigen, meta.kappa))
@@ -181,7 +151,6 @@ function find_runs_csv(path::AbstractString)
         push!(candidates, @sprintf("alpha_%.2e_runs_sched_theory_omega_%.6e_eigen_%.2e.csv", meta.param, meta.scale, meta.eigen))
     else
         push!(candidates, @sprintf("alpha_%.2e_runs_scale_%.6e_eigen_%.2e.csv", meta.param, meta.scale, meta.eigen))
-        push!(candidates, @sprintf("alpha_%.2e_runs_omega_%.6e_eigen_%.2e.csv", meta.param, meta.scale, meta.eigen))
     end
     for name in candidates
         full = joinpath(base_dir, name)
@@ -189,7 +158,7 @@ function find_runs_csv(path::AbstractString)
             return full
         end
     end
-    return joinpath(base_dir, first(candidates))
+    return isempty(candidates) ? "" : joinpath(base_dir, first(candidates))
 end
 
 function print_help()
@@ -198,1045 +167,576 @@ function print_help()
 Usage: julia $scr --dir <output_dir>
 
 Options:
-  --dir <Str>       results directory to plot (e.g., td_divergence_logs/toyexample_YYYYMMDD_HHMMSS)
-  --gamma <Float>   override gamma when not in CSV (used for compact plot)
+  --dir <Str>       results directory to plot
   -h, --help        show this help and exit
 """)
 end
 
-
 function parse_args(args)
     dir = nothing
-    gamma_override = nothing
     i = 1
     while i <= length(args)
         arg = args[i]
         if arg == "--help" || arg == "-h"
-            print_help(); exit(0)
+            print_help()
+            exit(0)
         elseif arg == "--dir" && i < length(args)
-            dir = args[i+1]; i += 2; continue
-        elseif arg == "--gamma" && i < length(args)
-            gamma_override = parse(Float64, args[i+1]); i += 2; continue
+            dir = args[i + 1]
+            i += 2
+            continue
         else
-            @printf "Unknown or incomplete arg: %s\n" arg
+            @printf("Unknown or incomplete arg: %s\n", arg)
             i += 1
         end
     end
-    if dir === nothing
-        error("Usage: julia plot_divergence.jl --dir <output_dir>")
-    end
-    return (dir=dir, gamma_override=gamma_override)
+    dir === nothing && error("Usage: julia plot_divergence.jl --dir <output_dir>")
+    return (dir=dir,)
 end
-
 
 function read_aggregated_csv(path::AbstractString)
     open(path, "r") do io
-        _ = readline(io) # header
-        first = nothing
-        last = nothing
+        _ = readline(io)
+        first_line = nothing
+        last_line = nothing
         for line in eachline(io)
-            first === nothing && (first = line)
-            last = line
+            first_line === nothing && (first_line = line)
+            last_line = line
         end
-        last === nothing && error("Empty CSV: $path")
-        function parse_row(s)
-            p = split(chomp(s), ",")
-            len = length(p)
-            len < 6 && error("Unexpected aggregated CSV format: $path")
-            std_vbar      = len >= 7  ? (try parse(Float64, p[7]) catch; NaN end) : NaN
-            std_vbar_A    = len >= 8  ? (try parse(Float64, p[8]) catch; NaN end) : NaN
-            max_std_theta = len >= 9  ? (try parse(Float64, p[9]) catch; NaN end) : NaN
-            lambda_min    = len >= 10 ? (try parse(Float64, p[10]) catch; NaN end) : NaN
-            kappa         = len >= 11 ? (try parse(Float64, p[11]) catch; NaN end) : NaN
-            gamma         = len >= 12 ? (try parse(Float64, p[12]) catch; NaN end) : NaN
+        last_line === nothing && error("Empty CSV: $path")
+        function parse_row(line)
+            parts = split(chomp(line), ",")
             return (
-                t=parse(Int, p[1]),
-                avg_vbar=parse(Float64, p[2]),
-                avg_vbar_A=parse(Float64, p[3]),
-                avg_theta_norm=parse(Float64, p[4]),
-                max_avg_theta=parse(Float64, p[5]),
-                theta_star_norm=parse(Float64, p[6]),
-                std_vbar=std_vbar,
-                std_vbar_A=std_vbar_A,
-                max_std_theta=max_std_theta,
-                lambda_min=lambda_min,
-                kappa=kappa,
-                gamma=gamma
+                t=parse(Int, parts[1]),
+                avg_vbar=parse(Float64, parts[2]),
+                avg_vbar_A=parse(Float64, parts[3]),
+                avg_theta_norm=parse(Float64, parts[4]),
+                max_avg_theta=parse(Float64, parts[5]),
+                theta_star_norm=parse(Float64, parts[6]),
+                std_vbar=length(parts) >= 7 ? parse(Float64, parts[7]) : NaN,
+                std_vbar_A=length(parts) >= 8 ? parse(Float64, parts[8]) : NaN,
+                max_std_theta=length(parts) >= 9 ? parse(Float64, parts[9]) : NaN,
+                lambda_min=length(parts) >= 10 ? parse(Float64, parts[10]) : NaN,
+                kappa=length(parts) >= 11 ? parse(Float64, parts[11]) : NaN,
+                gamma=length(parts) >= 12 ? parse(Float64, parts[12]) : NaN,
             )
         end
-        return parse_row(first), parse_row(last)
+        return parse_row(first_line), parse_row(last_line)
     end
 end
 
 function read_run_csv(path::AbstractString)
     open(path, "r") do io
-        _ = readline(io) # header
+        _ = readline(io)
         n = 0
         div = 0
         for line in eachline(io)
             parts = split(chomp(line), ",")
             n += 1
-            length(parts) >= 2 || continue
-            diverged = try parse(Int, parts[2]) catch; 0 end
-            div += diverged
+            if length(parts) >= 2
+                div += parse(Int, parts[2])
+            end
         end
-        rate = n == 0 ? 0.0 : div / n
-        return (n_runs=n, divergence_rate=rate)
+        return (n_runs=n, divergence_rate=n == 0 ? 0.0 : div / n)
     end
 end
 
+function read_manifest(outdir::AbstractString)
+    path = joinpath(outdir, "manifest.tsv")
+    isfile(path) || return nothing
+    rows = NamedTuple[]
+    open(path, "r") do io
+        header = split(chomp(readline(io)), '\t')
+        for line in eachline(io)
+            parts = split(chomp(line), '\t')
+            length(parts) == length(header) || continue
+            row = NamedTuple{Tuple(Symbol.(header))}(Tuple(parts))
+            push!(rows, row)
+        end
+    end
+    return rows
+end
+
+function collect_groups_from_manifest(outdir::AbstractString, manifest_rows)
+    by_case = Dict{String, Vector{NamedTuple}}()
+    for row in manifest_rows
+        push!(get!(by_case, row.case_id, NamedTuple[]), row)
+    end
+    groups = NamedTuple[]
+    for case_id in sort(collect(keys(by_case)))
+        rows = sort(by_case[case_id], by = r -> parse(Float64, r.param_value))
+        push!(groups, (
+            group_id=case_id,
+            label=rows[1].case_label,
+            slug=string("case-", case_id),
+            param_name=rows[1].param_name,
+            entries=[(
+                param=parse(Float64, row.param_value),
+                agg_path=joinpath(outdir, row.agg_file),
+                run_path=joinpath(outdir, row.run_file),
+                lambda_min=parse(Float64, row.lambda_min),
+                kappa=parse(Float64, row.kappa),
+                gamma=parse(Float64, row.gamma),
+            ) for row in rows],
+        ))
+    end
+    env_name = isempty(groups) ? split(basename(outdir), "_")[1] : manifest_rows[1].env_id
+    return env_name, groups
+end
+
+function collect_groups_legacy(outdir::AbstractString)
+    files = filter(f -> occursin("alpha_", basename(f)) && endswith(f, ".csv") && !occursin("_runs_", basename(f)), readdir(outdir; join=true))
+    isempty(files) && error("No aggregated alpha_*.csv files found in $outdir")
+    grouped = Dict{String, Vector{String}}()
+    labels = Dict{String, String}()
+    param_names = Dict{String, String}()
+    slugs = Dict{String, String}()
+    for f in files
+        meta = parse_alpha_filename(f)
+        gid = if !isempty(meta.case_id)
+            string("case-", meta.case_id)
+        elseif isfinite(meta.scale)
+            @sprintf("scale-%.3e", meta.scale)
+        elseif isfinite(meta.eigen)
+            @sprintf("lambda-%.3e", meta.eigen)
+        else
+            slugify(basename(f))
+        end
+        push!(get!(grouped, gid, String[]), f)
+        if !haskey(labels, gid)
+            labels[gid] = if isfinite(meta.scale)
+                @sprintf("scale=%.3e", meta.scale)
+            elseif isfinite(meta.eigen)
+                @sprintf("lambda=%.3e", meta.eigen)
+            else
+                gid
+            end
+            param_names[gid] = meta.is_sched ? "c" : "alpha"
+            slugs[gid] = gid
+        end
+    end
+    groups = NamedTuple[]
+    for gid in sort(collect(keys(grouped)))
+        flist = sort(grouped[gid], by = f -> parse_alpha_filename(f).param)
+        push!(groups, (
+            group_id=gid,
+            label=labels[gid],
+            slug=slugs[gid],
+            param_name=param_names[gid],
+            entries=[(
+                param=parse_alpha_filename(f).param,
+                agg_path=f,
+                run_path=find_runs_csv(f),
+                lambda_min=parse_alpha_filename(f).eigen,
+                kappa=parse_alpha_filename(f).kappa,
+                gamma=NaN,
+            ) for f in flist],
+        ))
+    end
+    return split(basename(outdir), "_")[1], groups
+end
+
+function collect_groups(outdir::AbstractString)
+    manifest_rows = read_manifest(outdir)
+    if manifest_rows !== nothing && !isempty(manifest_rows)
+        return collect_groups_from_manifest(outdir, manifest_rows)
+    end
+    return collect_groups_legacy(outdir)
+end
+
+function compute_group_metrics(group)
+    params = Float64[]
+    ratio = Float64[]
+    divergence = Float64[]
+    objD = Float64[]
+    objA = Float64[]
+    theta = Float64[]
+    files = String[]
+    lambda_min = NaN
+    kappa = NaN
+    gamma = NaN
+    T = 0
+    for entry in group.entries
+        push!(params, entry.param)
+        firstrow, lastrow = read_aggregated_csv(entry.agg_path)
+        push!(objD, lastrow.avg_vbar)
+        push!(objA, lastrow.avg_vbar_A)
+        push!(theta, lastrow.avg_theta_norm)
+        push!(ratio, lastrow.max_avg_theta / max(lastrow.theta_star_norm, eps()))
+        T = max(T, lastrow.t + 1)
+        lambda_min = isfinite(lastrow.lambda_min) ? lastrow.lambda_min : entry.lambda_min
+        kappa = isfinite(lastrow.kappa) ? lastrow.kappa : entry.kappa
+        gamma = isfinite(lastrow.gamma) ? lastrow.gamma : entry.gamma
+        if !isempty(entry.run_path) && isfile(entry.run_path)
+            stats = read_run_csv(entry.run_path)
+            push!(divergence, stats.divergence_rate)
+        else
+            push!(divergence, 0.0)
+        end
+        push!(files, entry.agg_path)
+    end
+    return (; params, ratio, divergence, objD, objA, theta, files, lambda_min, kappa, gamma, T)
+end
+
+function select_param_subset(entries)
+    buckets = Dict{Int, Vector{Tuple{Float64,String}}}()
+    for entry in entries
+        b = floor(Int, log10(entry.param))
+        push!(get!(buckets, b, Tuple{Float64,String}[]), (entry.param, entry.agg_path))
+    end
+    selected = Tuple{Float64,String}[]
+    for key in sort(collect(keys(buckets)))
+        arr = sort(buckets[key], by = x -> x[1])
+        if length(arr) >= 2
+            push!(selected, first(arr))
+            push!(selected, last(arr))
+        else
+            append!(selected, arr)
+        end
+    end
+    return sort(selected, by = x -> x[1])
+end
+
+function read_curve_downsampled(path::AbstractString, idxcol::Int; maxpoints::Int=2000)
+    n = 0
+    open(path, "r") do io
+        _ = readline(io)
+        for _ in eachline(io)
+            n += 1
+        end
+    end
+    n == 0 && return Float64[], Float64[]
+    stride = max(1, cld(n, maxpoints))
+    ts = Float64[]
+    ys = Float64[]
+    open(path, "r") do io
+        _ = readline(io)
+        idx = 0
+        for line in eachline(io)
+            if (idx % stride) == 0
+                parts = split(chomp(line), ",")
+                if length(parts) >= idxcol
+                    t = parse(Int, parts[1])
+                    y = sanitize_val(parse(Float64, parts[idxcol]))
+                    if y > 0
+                        push!(ts, t + 1.0)
+                        push!(ys, y)
+                    end
+                end
+            end
+            idx += 1
+        end
+    end
+    return ts, ys
+end
+
+function read_combo_curve_downsampled(path::AbstractString; maxpoints::Int=2000)
+    n = 0
+    open(path, "r") do io
+        _ = readline(io)
+        for _ in eachline(io)
+            n += 1
+        end
+    end
+    n == 0 && return Float64[], Float64[]
+    stride = max(1, cld(n, maxpoints))
+    ts = Float64[]
+    ys = Float64[]
+    open(path, "r") do io
+        _ = readline(io)
+        idx = 0
+        for line in eachline(io)
+            if (idx % stride) == 0
+                parts = split(chomp(line), ",")
+                y = sanitize_val(parse(Float64, parts[2]) + parse(Float64, parts[3]))
+                if y > 0
+                    push!(ts, parse(Int, parts[1]) + 1.0)
+                    push!(ys, y)
+                end
+            end
+            idx += 1
+        end
+    end
+    return ts, ys
+end
+
+function representative_groups(groups; max_groups::Int=3)
+    n = length(groups)
+    n <= max_groups && return groups
+    idxs = unique(round.(Int, range(1, n, length=max_groups)))
+    return groups[idxs]
+end
 
 function plot_divergence(outdir::AbstractString)
-
-    files = filter(f->occursin("alpha_", f) && endswith(f, ".csv") && !occursin("_runs_", f), readdir(outdir; join=true))
-    isempty(files) && error("No aggregated alpha_*.csv files found in $outdir")
-
-    groups   = Dict{Float64, Vector{String}}()
-    fallback = Dict{Float64, Vector{String}}()
-    for f in files
-        meta = parse_alpha_filename(f)
-        if isfinite(meta.scale)
-            push!(get!(groups, meta.scale, String[]), f)
-        elseif isfinite(meta.eigen)
-            push!(get!(fallback, meta.eigen, String[]), f)
-        end
-    end
-    if isempty(groups)
-        for (lam, flist) in fallback
-            groups[lam] = flist
-        end
-    end
-
-    env_name = split(basename(outdir), "_")[1]
-
-    compute_metrics = function(flist::Vector{String})
-        pairs = [(parse_alpha_filename(f).param, f) for f in flist]
-        sort!(pairs, by=x->x[1])
-        alphas = Float64[]
-        final_vbar = Float64[]
-        final_vbar_std = Float64[]
-        final_vbar_A = Float64[]
-        final_vbar_A_std = Float64[]
-        final_theta = Float64[]
-        ratio_mean = Float64[]
-        ratio_std  = Float64[]
-        divergence = Float64[]
-        theta_star_norm = 1.0
-        T = 0
-        group_kappa = NaN
-        group_eigen = NaN
-        for (a, f) in pairs
-            meta = parse_alpha_filename(f)
-            push!(alphas, a)
-            firstrow, lastrow = read_aggregated_csv(f)
-            push!(final_vbar, lastrow.avg_vbar)
-            push!(final_vbar_A, getfield(lastrow, :avg_vbar_A))
-            push!(final_theta, lastrow.avg_theta_norm)
-            push!(final_vbar_std, getfield(lastrow, :std_vbar))
-            push!(final_vbar_A_std, getfield(lastrow, :std_vbar_A))
-            theta_star_norm = lastrow.theta_star_norm
-            r_mean = lastrow.max_avg_theta / max(lastrow.theta_star_norm, eps())
-            r_std  = isfinite(getfield(lastrow, :max_std_theta)) ? (lastrow.max_std_theta / max(lastrow.theta_star_norm, eps())) : NaN
-            push!(ratio_mean, r_mean)
-            push!(ratio_std, r_std)
-            T = max(T, lastrow.t + 1)
-            runfile = find_runs_csv(f)
-            if isfile(runfile)
-                stats = read_run_csv(runfile)
-                push!(divergence, stats.divergence_rate)
-            else
-                push!(divergence, 0.0)
-            end
-            if isnan(group_kappa) && isfinite(meta.kappa)
-                group_kappa = meta.kappa
-            end
-            if isnan(group_eigen) && isfinite(meta.eigen)
-                group_eigen = meta.eigen
-            end
-        end
-        return (; alphas, final_vbar, final_vbar_std, final_vbar_A, final_vbar_A_std, final_theta,
-                  ratio_mean, ratio_std, divergence, theta_star_norm, T, flist, kappa=group_kappa, eigen=group_eigen)
-    end
-
-    # If PyPlot not available, print summaries per group
+    env_name, groups = collect_groups(outdir)
+    isempty(groups) && return
     if !HAVE_PYPLOT
-        @error "PyPlot not available. Install via: using Pkg; Pkg.add(\"PyPlot\")"
-        println("Summary (no plots):")
-        for (key, flist) in groups
-            m = compute_metrics(flist)
-            # Report by eigen value and condition number when available
-            lam = m.eigen
-            kap = m.kappa
-            caption = lambda_caption(lam, kap)
-            println("--- ", caption.plain, " ---")
-            @printf("alpha, final_vbar, final_theta, max_avg_theta/||\\theta^*||^2, divergence_rate\n")
-            for i in eachindex(m.alphas)
-                @printf("%.3e, %.6g, %.6g, %.6g, %.3f\n", m.alphas[i], m.final_vbar[i], m.final_theta[i], m.ratio_mean[i], m.divergence[i])
-            end
+        println("PyPlot not available. Summary only:")
+        for group in groups
+            metrics = compute_group_metrics(group)
+            println(short_label(group.label), " | lambda=", @sprintf("%.3e", metrics.lambda_min), " | kappa=", @sprintf("%.3e", metrics.kappa))
         end
         return
     end
-
-    gamma_env = get(ENV, "PLOT_GAMMA", "")
-    gamma_env_val = try parse(Float64, gamma_env) catch; NaN end
-
     plt = plt_global
-
-  
-    sanitize_val(v::Float64) = !isfinite(v) ? PLOT_CAP_VALUE : (v > PLOT_CAP_VALUE ? PLOT_CAP_VALUE : v)
-
-    valid_xy(x, y) = begin
-        # sanitize y, then keep positive entries for log-y plots
-        yy_s = [sanitize_val(v) for v in y]
-        idx = [i for i in eachindex(yy_s) if yy_s[i] > 0 && x[i] > 0]
-        xx = x[idx]
-        yy = yy_s[idx]
-        return xx, yy
-    end
-
-    # Subsample helper to reduce plotted points when arrays are large
-    function subsample(x::AbstractVector, y::AbstractVector; maxpoints::Int=50000)
-        n = length(x)
-        if n <= maxpoints
-            return x, y
-        end
-        stride = cld(n, maxpoints)
-        idx = 1:stride:n
-        return x[idx], y[idx]
-    end
-
-    plot_dir = joinpath(outdir, "plots"); mkpath(plot_dir)
-
-    # Helpers for descriptive labels based on filenames
-    param_key_for = function(path::AbstractString)
-        base = basename(path)
-        return occursin("sched_theory", base) ? "c" : "alpha"
-    end
-
-    scale_suffix = function(path::AbstractString)
-        meta = parse_alpha_filename(path)
-        if isfinite(meta.scale)
-            return @sprintf("__scale-%.3e", meta.scale)
-        else
-            return ""
-        end
-    end
-
-    xlabel_for = function(path::AbstractString)
-        base = basename(path)
-        return occursin("sched_theory", base) ? L"c" : L"\alpha"
-    end
-
-    for (key, flist) in groups
-        m = compute_metrics(flist)       
-
+    plot_dir = joinpath(outdir, "plots")
+    mkpath(plot_dir)
+    for group in groups
+        metrics = compute_group_metrics(group)
         fig = Base.invokelatest(plt.figure)
-        fig.set_size_inches(20, 4.5)
+        fig.set_size_inches(16, 4.5)
 
-        # Plot 0: ratio
-        ax0 = Base.invokelatest(plt.subplot, 1, 3, 1)
-        x_ratio = m.alphas
-        y_ratio = [min(max(sanitize_val(r), Y_MIN_RATIO), Y_MAX_RATIO) for r in m.ratio_mean]
-        ax0.set_xscale("log"); ax0.set_yscale("log")
-        ax0.set_xlabel(xlabel_for(m.flist[1])); ax0.set_ylabel(L"\max_{i\leq T} \, E[\| \theta_i \|^2] / \| \theta^* \|^2")
-        ax0.set_ylim(Y_MIN_RATIO, Y_MAX_RATIO)
-        lam = m.eigen
-        kap = m.kappa
-        caption = lambda_caption(lam, kap)
-        caption_latex = caption.latex
-        caption_plain = caption.plain
-        ax0.set_title(latexstring("$(caption_latex)~\\mathrm{ratio}"))
-        ax0.grid(true, alpha=1.0, which="both")
-
-        # Plot 1: divergence rate
-        ax2 = Base.invokelatest(plt.subplot, 1, 3, 2)
-        xd, yd = subsample(m.alphas, m.divergence; maxpoints=parse(Int, get(ENV, "PLOT_MAX_POINTS", "50000")))
-        ax2.set_xscale("log")
-        ax2.set_xlabel(xlabel_for(m.flist[1])); ax2.set_ylabel("Divergence Rate")
-        ax2.set_title("Probability of Divergence")
-        ax2.grid(true, alpha=1.0, which="both")
-        ax2.set_ylim(-0.05, 1.05)
-        ax2.axhline(y=0.5, color="gray", linestyle="--", alpha=1.0)
-
-        # Plot 3: Suboptimality gap
-        ax3 = Base.invokelatest(plt.subplot, 1, 3, 3)
-        xA_all, yA_all = valid_xy(m.alphas, [sanitize_val(v) for v in m.final_vbar_A])
-        xA, yA = subsample(xA_all, yA_all; maxpoints=parse(Int, get(ENV, "PLOT_MAX_POINTS", "50000")))
-        ax3.set_ylim(Y_MIN_OBJ, Y_MAX_OBJ)
-        ax3.set_xscale("log"); ax3.set_yscale("log")
-        ax3.set_xlabel(xlabel_for(m.flist[1])); ax3.set_ylabel(L"(1-\gamma)\,E[\| V_{\bar{\theta}_T} - V_{\theta^*} \|^2_D] + \gamma\,E[\| V_{\bar{\theta}_T} - V_{\theta^*} \|^2_{\mathrm{Dirichlet}}]")
-        ax3.set_title("Suboptimality Gap")
-        ax3.grid(true, alpha=1.0, which="both")
-        is_c = occursin("sched_theory", basename(m.flist[1]))
-        xmin = is_c ? 1e-8 : 1e-6
-        xmax = is_c ? 1e8  : 1
-        xr0, yr0 = filter_xy_xrange(x_ratio, y_ratio, xmin, xmax)
-        if !isempty(xr0)
-            ax0.plot(xr0, yr0; marker="o", linestyle="-", linewidth=2, markersize=6, color="blue")
-        end
-        xd2, yd2 = filter_xy_xrange(xd, yd, xmin, xmax)
-        if !isempty(xd2)
-            ax2.plot(xd2, yd2; marker="o", linestyle="-", linewidth=2, markersize=6, color="red")
-        end
-        xA2, yA2 = filter_xy_xrange(xA, yA, xmin, xmax)
-        if !isempty(xA2)
-            ax3.plot(xA2, yA2; marker="o", linestyle="-", linewidth=2, markersize=6, color="purple")
-        end
-        ax0.set_xlim(xmin, xmax)
-        ax2.set_xlim(xmin, xmax)
-        ax3.set_xlim(xmin, xmax)
-
-        plt.suptitle(@sprintf("%s: Final Time Analysis; T=%d)", uppercase(env_name), m.T), fontsize=16)
-        plt.tight_layout()
-        pkey = param_key_for(m.flist[1])
-        sc_sfx = scale_suffix(m.flist[1])
-        outpng = joinpath(plot_dir, @sprintf("%s__final__x-%s__eig-%.3e%s.eps", env_name, pkey, lam, sc_sfx))
-        _safe_savefig(plt, outpng)
-        Base.invokelatest(plt.close)
-        println()
-        println("Plots saved in ", plot_dir)
-        println(@sprintf("  - %s: Final analysis (3 panels) vs %s (%s)", basename(outpng), pkey, caption_plain))
-
-        # ---- Learning curves per eigen: E[||V_theta_bar_t - V*||^2_D] vs t ----
-        function select_alpha_subset(files::Vector{String})
-            pairs = [(parse_alpha_filename(f).param, f) for f in files]
-            sort!(pairs, by=x->x[1])
-            buckets = Dict{Int, Vector{Tuple{Float64,String}}}()
-            for p in pairs
-                a = p[1]
-                b = floor(Int, log10(a))
-                push!(get!(buckets, b, Tuple{Float64,String}[]), p)
-            end
-            selected = Tuple{Float64,String}[]
-            for b in sort(collect(keys(buckets)))
-                arr = buckets[b]
-                sort!(arr, by=x->x[1])
-                if length(arr) >= 2
-                    push!(selected, first(arr))
-                    push!(selected, last(arr))
-                else
-                    append!(selected, arr)
-                end
-            end
-            sort!(selected, by=x->x[1])
-            return selected
-        end
-
-        function read_curve_downsampled(path::AbstractString, T::Int; maxpoints::Int=50000)
-            stride = max(1, cld(T, maxpoints))
-            ts = Int[]
-            ys = Float64[]
-            open(path, "r") do io
-                _ = readline(io)
-                idx = 0
-                for line in eachline(io)
-                    if (idx % stride) == 0
-                        parts = split(chomp(line), ",")
-                        t = parse(Int, parts[1])
-                        y = parse(Float64, parts[2])
-                        if isfinite(y) && y > 0
-                            push!(ts, t)
-                            push!(ys, y)
-                        end
-                    end
-                    idx += 1
-                end
-            end
-            return ts, ys
-        end
-
-        sel = select_alpha_subset(m.flist)
-        if !isempty(sel)
-            fig2 = Base.invokelatest(plt.figure)
-            fig2.set_size_inches(9, 6)
-            axL = Base.invokelatest(plt.subplot, 1, 1, 1)
-            axL.set_title(latexstring("Learning Curves: $(caption_latex)"))
-            cmap = Base.invokelatest(plt.get_cmap, "tab10")
-            for (i, (a, f)) in enumerate(sel)
-                ts, ys = read_curve_downsampled(f, m.T; maxpoints=parse(Int, get(ENV, "PLOT_MAX_POINTS", "200000")))
-                if !isempty(ts)
-                    color = cmap((i-1) % 10 / 9)
-                    pname = occursin("sched_theory", basename(f)) ? "c" : "alpha"
-                    axL.plot(ts, ys; linewidth=1.8, label=@sprintf("%s=%.2e", pname, a), color=color)
-                end
-            end
-            axL.set_xlabel(L"t")
-            axL.set_ylabel(L"(1-\gamma)\,E[\| \bar V_{\bar{\theta}_t} - V_{\theta^*} \|^2_D]")
-            axL.set_yscale("log")
-            axL.grid(true, alpha=1.0, which="both")
-            axL.legend(loc="best", fontsize=8, ncol=2)
-            pkey = param_key_for(m.flist[1])
-            sc_sfx = scale_suffix(m.flist[1])
-            axL.set_ylim(CURVE_MIN_OBJ, CURVE_MAX_OBJ)
-            axL.set_xlim(0, max(m.T - 1, 1))
-            outpng2 = joinpath(plot_dir, @sprintf("%s__curves__obj-A=(1-gamma)D__x-t__param-%s__eig-%.3e%s.eps", env_name, pkey, lam, sc_sfx))
-            _safe_savefig(plt, outpng2)
-            Base.invokelatest(plt.close)
-            println(@sprintf("  - %s: Learning curves per eigen (<= 2 alphas per decade)", basename(outpng2)))
-            figA2 = Base.invokelatest(plt.figure)
-            figA2.set_size_inches(9, 6)
-            axLA = Base.invokelatest(plt.subplot, 1, 1, 1)
-            axLA.set_title(latexstring("Learning Curves: $(caption_latex)"))
-            for (i, (a, f)) in enumerate(sel)
-                tsA = Int[]; ysA = Float64[]
-                open(f, "r") do io
-                    _ = readline(io)
-                    idx = 0
-                    stride = max(1, cld(m.T, parse(Int, get(ENV, "PLOT_MAX_POINTS", "200000"))))
-                    for line in eachline(io)
-                        if (idx % stride) == 0
-                            parts = split(chomp(line), ",")
-                            if length(parts) >= 3
-                                t = parse(Int, parts[1]); y = parse(Float64, parts[3])
-                                if isfinite(y) && y > 0
-                                    push!(tsA, t); push!(ysA, y)
-                                end
-                            end
-                        end
-                        idx += 1
-                    end
-                end
-                if !isempty(tsA)
-                    color = cmap((i-1) % 10 / 9)
-                    pname = occursin("sched_theory", basename(f)) ? "c" : "alpha"
-                    axLA.plot(tsA, ysA; linewidth=1.8, label=@sprintf("%s=%.2e", pname, a), color=color)
-                end
-            end
-            axLA.set_xlabel(L"t")
-            axLA.set_ylabel(L"(1-\gamma)\,E[\| V_{\bar{\theta}_T} - V_{\theta^*} \|^2_D] + \gamma\,E[\| V_{\bar{\theta}_T} - V_{\theta^*} \|^2_{\mathrm{Dirichlet}}]")
-            axLA.set_yscale("log")
-            axLA.grid(true, alpha=1.0, which="both")
-            axLA.legend(loc="best", fontsize=8, ncol=2)
-            axLA.set_ylim(Y_MIN_OBJ, Y_MAX_OBJ)
-            axLA.set_xlim(0, max(m.T - 1, 1))
-            outpngA2 = joinpath(plot_dir, @sprintf("%s__curves__obj-A=(1-gamma)D+gammaS__x-t__param-%s__eig-%.3e%s.eps", env_name, pkey, lam, sc_sfx))
-            _safe_savefig(plt, outpngA2)
-            Base.invokelatest(plt.close)
-            println(@sprintf("  - %s: Learning curves (A) per eigen (<= 2 alphas per decade)", basename(outpngA2)))
-        end
-    end
-end
-
-
-"""
-Build a single big figure where each row corresponds to a parameter value
-(alpha for alpha-sweep; c for theory-schedule) and columns are:
-  1) Ratio: max E||theta||^2 / ||theta*||^2 vs eigen
-  2) Divergence rate vs eigen
-  3) Suboptimality gap vs eigen
-
-Generates two figures if both alpha-sweep and c-sweep files are present.
-"""
-function plot_big_final_grid(outdir::AbstractString)
-    !HAVE_PYPLOT && return
-    plt = plt_global
-
-    files_all = readdir(outdir; join=true)
-    agg_files = filter(f->occursin("alpha_", f) && endswith(f, ".csv") && !occursin("_runs_", f) && !occursin("ratio_", f), files_all)
-    isempty(agg_files) && return
-
-    # Identify sweep type by presence of "sched_theory"
-    is_c_file(f) = occursin("sched_theory", basename(f))
-    groups = Dict(
-        :alpha => filter(f->!is_c_file(f), agg_files),
-        :c     => filter(f-> is_c_file(f), agg_files)
-    )
-
-    # Parse tokens from filenames
-    function parse_tokens(path::AbstractString)
-        meta = parse_alpha_filename(path)
-        return meta.param, meta.scale, meta.eigen, meta.kappa, meta.is_sched
-    end
-
-
-    env_name = split(basename(outdir), "_")[1]
-    plot_dir = joinpath(outdir, "plots"); mkpath(plot_dir)
-
-    # Helper for linear-y filtering (keep finite y, positive x)
-    function filter_posx_linear(x::Vector{Float64}, y::Vector{Float64})
-        xx = Float64[]; yy = Float64[]
-        @inbounds for i in eachindex(x)
-            xi = x[i]; yi = y[i]
-            if isfinite(xi) && xi > 0 && isfinite(yi)
-                push!(xx, xi); push!(yy, yi)
-            end
-        end
-        return xx, yy
-    end
-
-    for (sweeptype, files) in pairs(groups)
-        isempty(files) && continue
-
-        # Group aggregated files by eigenvalue
-        by_lam = Dict{Float64, Vector{String}}()
-        for f in files
-            _, _, lam, _, _ = parse_tokens(f)
-            push!(get!(by_lam, lam, String[]), f)
-        end
-        lams = sort(collect(keys(by_lam)))
-        nrows = length(lams)
-        ncols = 3
-        fig = Base.invokelatest(plt.figure)
-        fig.set_size_inches(5.0*ncols, max(3.2*nrows, 4.5))
-
-        for (i, lam) in enumerate(lams)
-            flist = by_lam[lam]
-            meta_first = parse_alpha_filename(flist[1])
-            kap = meta_first.kappa
-            lam_label = @sprintf("%.3e", lam)
-            if isfinite(kap)
-                kap_label = @sprintf("%.3e", kap)
-                row_caption = latexstring("eigen $(lam_label)\nkappa $(kap_label)")
-            else
-                row_caption = latexstring("eigen $(lam_label)")
-            end
-            # Collect series across parameter values for this eigen
-            params = Float64[]; ratio = Float64[]; diver = Float64[]; objA = Float64[]
-            # Sort by parameter value ascending
-            sort!(flist, by = f -> (parse_tokens(f)[1]))
-            for f in flist
-                pval, _, _, _, _ = parse_tokens(f)
-                _, last = read_aggregated_csv(f)
-                r = sanitize_val(last.max_avg_theta / max(last.theta_star_norm, eps()))
-                aA = sanitize_val(getfield(last, :avg_vbar_A))
-                push!(params, pval)
-                push!(ratio, r)
-                push!(objA, aA)
-                rf = find_runs_csv(f)
-                if isfile(rf)
-                    s = read_run_csv(rf)
-                    push!(diver, s.divergence_rate)
-                else
-                    push!(diver, NaN)
-                end
-            end
-
-            # Column 1: Ratio vs param
-            ax = Base.invokelatest(plt.subplot, nrows, ncols, (i-1)*ncols + 1)
-            xr, yr = valid_xy(params, ratio)
-            if !isempty(xr)
-                ax.plot(xr, clamp_vec(yr, Y_MIN_RATIO, Y_MAX_RATIO); marker="o", linestyle="-", linewidth=1.8, markersize=4, color="blue")
-            end
-            ax.set_xscale("log"); ax.set_yscale("log")
-            ax.set_ylim(Y_MIN_RATIO, Y_MAX_RATIO)
-            if i == 1
-                ax.set_title("Ratio")
-            end
-            ax.set_ylabel(row_caption)
-
-            # Column 2: Divergence vs param (linear y)
-            ax2 = Base.invokelatest(plt.subplot, nrows, ncols, (i-1)*ncols + 2)
-            xd, yd = filter_posx_linear(params, diver)
-            if !isempty(xd)
-                ax2.plot(xd, yd; marker="o", linestyle="-", linewidth=1.8, markersize=4, color="red")
-            end
-            ax2.set_xscale("log"); ax2.set_ylim(-0.05, 1.05)
-            if i == 1
-                ax2.set_title("Divergence")
-            end
-
-            # Column 3: Suboptimality gap vs param
-            ax3 = Base.invokelatest(plt.subplot, nrows, ncols, (i-1)*ncols + 3)
-            xA, yA = valid_xy(params, objA)
-            if !isempty(xA)
-                ax3.plot(xA, clamp_vec(yA, Y_MIN_OBJ, Y_MAX_OBJ); marker="o", linestyle="-", linewidth=1.8, markersize=4, color="purple")
-            end
-            ax3.set_xscale("log"); ax3.set_yscale("log")
-            ax3.set_ylim(Y_MIN_OBJ, Y_MAX_OBJ)
-            if i == 1
-                ax3.set_title("Suboptimality Gap")
-            end
-
-            # Bottom row x-labels
-            if i == nrows
-                ax.set_xlabel(sweeptype==:c ? L"c" : L"\alpha")
-                ax2.set_xlabel(sweeptype==:c ? L"c" : L"\alpha")
-                ax3.set_xlabel(sweeptype==:c ? L"c" : L"\alpha")
-            end
-            ax.grid(true, alpha=1.0, which="both")
-            ax2.grid(true, alpha=1.0, which="both")
-            ax3.grid(true, alpha=1.0, which="both")
-
-            # Per-sweep default x-limits
-            xmin = sweeptype==:c ? 1e-8 : 1e-6
-            xmax = sweeptype==:c ? 1e8  : 1e1
-            ax.set_xlim(xmin, xmax); ax2.set_xlim(xmin, xmax); ax3.set_xlim(xmin, xmax)
-        end
-
-        plt.tight_layout()
-        outpng = joinpath(plot_dir, @sprintf("%s__finalgrid__rows-%s.eps", env_name, sweeptype==:c ? "c" : "alpha"))
-        _safe_savefig(plt, outpng)
-        Base.invokelatest(plt.close)
-        println(@sprintf("  - %s: Big final grid by eigen (%s)", basename(outpng), sweeptype==:c ? "c" : "alpha"))
-    end
-end
-
-function plot_compact_c_grid(outdir::AbstractString; gamma_override::Union{Nothing,Float64}=nothing)
-    if !HAVE_PYPLOT
-        return
-    end
-    targets = COMPACT_SCALE_TARGETS
-    plt = plt_global
-    files = filter(f->occursin("alpha_", f) && occursin("sched_theory", f) && endswith(f, ".csv") && !occursin("_runs_", f) && !occursin("ratio_", f), readdir(outdir; join=true))
-    isempty(files) && return
-
-    by_scale = Dict{Float64, Vector{String}}()
-    for f in files
-        meta = parse_alpha_filename(f)
-        if isfinite(meta.scale)
-            push!(get!(by_scale, meta.scale, String[]), f)
-        end
-    end
-    isempty(by_scale) && return
-
-    selected = Vector{Tuple{Float64, Vector{String}}}()
-    used = Set{Float64}()
-    for target in targets
-        best_key = nothing
-        best_gap = Inf
-        target > 0 || continue
-        for (scale, flist) in by_scale
-            scale > 0 || continue
-            gap = abs(log(target) - log(scale))
-            if gap < best_gap
-                best_gap = gap
-                best_key = scale
-            end
-        end
-        if best_key !== nothing && !(best_key in used)
-            push!(selected, (best_key, copy(by_scale[best_key])))
-            push!(used, best_key)
-        end
-    end
-
-    isempty(selected) && return
-
-    env_name = split(basename(outdir), "_")[1]
-    plot_dir = joinpath(outdir, "plots"); mkpath(plot_dir)
-
-    function filter_posx_linear(x::Vector{Float64}, y::Vector{Float64})
-        xx = Float64[]; yy = Float64[]
-        @inbounds for i in eachindex(x)
-            xi = x[i]; yi = y[i]
-            if isfinite(xi) && xi > 0 && isfinite(yi)
-                push!(xx, xi); push!(yy, yi)
-            end
-        end
-        return xx, yy
-    end
-
-    nrows = length(selected)
-    ncols = 3
-    fig = Base.invokelatest(plt.figure)
-    fig.set_size_inches(5.0*ncols, max(2.5*nrows, 3.0))
-
-    for (row_idx, (scale, flist)) in enumerate(selected)
-        sort!(flist, by = f -> parse_alpha_filename(f).param)
-        params = Float64[]; ratio = Float64[]; diver = Float64[]; objA = Float64[]
-        lam = NaN
-        gamma_val = NaN
-        for f in flist
-            meta = parse_alpha_filename(f)
-            _, last = read_aggregated_csv(f)
-            if isfinite(last.lambda_min)
-                lam = last.lambda_min
-            elseif isfinite(meta.eigen)
-                lam = meta.eigen
-            end
-            if hasproperty(last, :gamma) && isfinite(getfield(last, :gamma))
-                gamma_val = getfield(last, :gamma)
-            elseif gamma_override !== nothing && isfinite(gamma_override)
-                gamma_val = gamma_override
-            elseif isfinite(gamma_env_val)
-                gamma_val = gamma_env_val
-            end
-            push!(params, meta.param)
-            push!(ratio, sanitize_val(last.max_avg_theta / max(last.theta_star_norm, eps())))
-            push!(objA, sanitize_val(getfield(last, :avg_vbar_A)))
-            runfile = find_runs_csv(f)
-            if isfile(runfile)
-                stats = read_run_csv(runfile)
-                push!(diver, stats.divergence_rate)
-            else
-                push!(diver, NaN)
-            end
-        end
-        ax_ratio = Base.invokelatest(plt.subplot, nrows, ncols, (row_idx-1)*ncols + 1)
-        xr, yr = valid_xy(params, ratio)
+        ax1 = Base.invokelatest(plt.subplot, 1, 3, 1)
+        xr, yr = valid_xy(metrics.params, metrics.ratio)
         if !isempty(xr)
-            ax_ratio.plot(xr, clamp_vec(yr, Y_MIN_RATIO, Y_MAX_RATIO); marker="o", linestyle="-", linewidth=1.8, markersize=4, color="blue")
+            ax1.plot(xr, clamp_vec(yr, Y_MIN_RATIO, Y_MAX_RATIO); marker="o", linewidth=1.8)
         end
-        ax_ratio.set_xscale("log"); ax_ratio.set_yscale("log")
-        ax_ratio.set_ylim(Y_MIN_RATIO, Y_MAX_RATIO)
-        ax_ratio.set_xlim(1e-8, 1e8)
-        ax_ratio.grid(true, alpha=1.0, which="both")
-        if !isfinite(gamma_val)
-            error("gamma not found. Re-run td_threshold_theory_sweep.jl to include gamma column, or pass gamma_override / set PLOT_GAMMA.")
-        end
-        if !isfinite(lam)
-            error("lambda_min not found in aggregated CSV or filename.")
-        end
-        lam_display = lam / (1.0 - gamma_val)
-        ax_ratio.set_ylabel(latexstring(@sprintf("\\omega=%.2e", lam_display)))
-        if row_idx == 1
-            ax_ratio.set_title("Ratio")
-        end
+        ax1.set_xscale("log")
+        ax1.set_yscale("log")
+        ax1.set_ylim(Y_MIN_RATIO, Y_MAX_RATIO)
+        ax1.set_xlabel(group.param_name)
+        ax1.set_ylabel("max E||theta||^2 / ||theta*||^2")
+        ax1.grid(true, which="both", alpha=1.0)
+        ax1.set_title("Ratio")
 
-        ax_div = Base.invokelatest(plt.subplot, nrows, ncols, (row_idx-1)*ncols + 2)
-        xd_lin, yd_lin = filter_posx_linear(params, diver)
-        if !isempty(xd_lin)
-            ax_div.plot(xd_lin, yd_lin; marker="o", linestyle="-", linewidth=1.8, markersize=4, color="red")
-        end
-        ax_div.set_xscale("log")
-        ax_div.set_xlim(1e-8, 1e8)
-        ax_div.set_ylim(-0.05, 1.05)
-        ax_div.grid(true, alpha=1.0, which="both")
-        if row_idx == 1
-            ax_div.set_title("Divergence")
-        end
+        ax2 = Base.invokelatest(plt.subplot, 1, 3, 2)
+        ax2.plot(metrics.params, metrics.divergence; marker="o", linewidth=1.8, color="red")
+        ax2.set_xscale("log")
+        ax2.set_ylim(-0.05, 1.05)
+        ax2.set_xlabel(group.param_name)
+        ax2.set_ylabel("Divergence Rate")
+        ax2.grid(true, which="both", alpha=1.0)
+        ax2.set_title("Divergence")
 
-        ax_obj = Base.invokelatest(plt.subplot, nrows, ncols, (row_idx-1)*ncols + 3)
-        xA, yA = valid_xy(params, objA)
-        if !isempty(xA)
-            ax_obj.plot(xA, clamp_vec(yA, Y_MIN_OBJ, Y_MAX_OBJ); marker="o", linestyle="-", linewidth=1.8, markersize=4, color="purple")
+        ax3 = Base.invokelatest(plt.subplot, 1, 3, 3)
+        xo, yo = valid_xy(metrics.params, metrics.objA)
+        if !isempty(xo)
+            ax3.plot(xo, clamp_vec(yo, Y_MIN_OBJ, Y_MAX_OBJ); marker="o", linewidth=1.8, color="purple")
         end
-        ax_obj.set_xscale("log"); ax_obj.set_yscale("log")
-        ax_obj.set_xlim(1e-8, 1e8)
-        ax_obj.set_ylim(Y_MIN_OBJ, Y_MAX_OBJ)
-        ax_obj.grid(true, alpha=1.0, which="both")
-        if row_idx == 1
-            ax_obj.set_title("Suboptimality Gap")
-        end
+        ax3.set_xscale("log")
+        ax3.set_yscale("log")
+        ax3.set_ylim(Y_MIN_OBJ, Y_MAX_OBJ)
+        ax3.set_xlabel(group.param_name)
+        ax3.set_ylabel("Suboptimality Gap")
+        ax3.grid(true, which="both", alpha=1.0)
+        ax3.set_title("Final A objective")
 
-        if row_idx == nrows
-            ax_ratio.set_xlabel(L"c")
-            ax_div.set_xlabel(L"c")
-            ax_obj.set_xlabel(L"c")
+        cap = @sprintf("%s | lambda=%.3e | kappa=%.3e", short_label(group.label; maxlen=48), metrics.lambda_min, metrics.kappa)
+        plt.suptitle(cap, fontsize=12)
+        plt.tight_layout()
+        outpath = joinpath(plot_dir, @sprintf("%s__final__%s.eps", env_name, slugify(group.slug)))
+        _safe_savefig(plt, outpath)
+        Base.invokelatest(plt.close)
+        println(@sprintf("  - %s: final analysis", basename(outpath)))
+    end
+end
+
+function plot_big_final_grid(outdir::AbstractString)
+    env_name, groups = collect_groups(outdir)
+    isempty(groups) && return
+    HAVE_PYPLOT || return
+    plt = plt_global
+    plot_dir = joinpath(outdir, "plots")
+    mkpath(plot_dir)
+    nrows = length(groups)
+    fig = Base.invokelatest(plt.figure)
+    fig.set_size_inches(15, max(3.0 * nrows, 3.0))
+    for (idx, group) in enumerate(groups)
+        metrics = compute_group_metrics(group)
+        ax1 = Base.invokelatest(plt.subplot, nrows, 3, (idx - 1) * 3 + 1)
+        xr, yr = valid_xy(metrics.params, metrics.ratio)
+        if !isempty(xr)
+            ax1.plot(xr, clamp_vec(yr, Y_MIN_RATIO, Y_MAX_RATIO); marker="o", linewidth=1.5)
+        end
+        ax1.set_xscale("log")
+        ax1.set_yscale("log")
+        ax1.set_ylim(Y_MIN_RATIO, Y_MAX_RATIO)
+        ax1.grid(true, which="both", alpha=1.0)
+        ax1.set_ylabel(short_label(group.label; maxlen=28))
+        idx == 1 && ax1.set_title("Ratio")
+
+        ax2 = Base.invokelatest(plt.subplot, nrows, 3, (idx - 1) * 3 + 2)
+        ax2.plot(metrics.params, metrics.divergence; marker="o", linewidth=1.5, color="red")
+        ax2.set_xscale("log")
+        ax2.set_ylim(-0.05, 1.05)
+        ax2.grid(true, which="both", alpha=1.0)
+        idx == 1 && ax2.set_title("Divergence")
+
+        ax3 = Base.invokelatest(plt.subplot, nrows, 3, (idx - 1) * 3 + 3)
+        xo, yo = valid_xy(metrics.params, metrics.objA)
+        if !isempty(xo)
+            ax3.plot(xo, clamp_vec(yo, Y_MIN_OBJ, Y_MAX_OBJ); marker="o", linewidth=1.5, color="purple")
+        end
+        ax3.set_xscale("log")
+        ax3.set_yscale("log")
+        ax3.set_ylim(Y_MIN_OBJ, Y_MAX_OBJ)
+        ax3.grid(true, which="both", alpha=1.0)
+        idx == 1 && ax3.set_title("Suboptimality")
+
+        if idx == nrows
+            ax1.set_xlabel(group.param_name)
+            ax2.set_xlabel(group.param_name)
+            ax3.set_xlabel(group.param_name)
         end
     end
-
     plt.tight_layout()
-    outpng = joinpath(plot_dir, @sprintf("%s__compact__rows-c.eps", env_name))
-    _safe_savefig(plt, outpng)
+    outpath = joinpath(plot_dir, @sprintf("%s__finalgrid__rows-c.eps", env_name))
+    _safe_savefig(plt, outpath)
     Base.invokelatest(plt.close)
-    println(@sprintf("  - %s: Compact c-grid", basename(outpng)))
+    println(@sprintf("  - %s: grid summary", basename(outpath)))
+end
+
+function plot_compact_c_grid(outdir::AbstractString)
+    env_name, groups = collect_groups(outdir)
+    isempty(groups) && return
+    HAVE_PYPLOT || return
+    selected = representative_groups(groups; max_groups=3)
+    plt = plt_global
+    plot_dir = joinpath(outdir, "plots")
+    mkpath(plot_dir)
+    nrows = length(selected)
+    fig = Base.invokelatest(plt.figure)
+    fig.set_size_inches(15, max(3.0 * nrows, 3.0))
+    for (idx, group) in enumerate(selected)
+        metrics = compute_group_metrics(group)
+        ax1 = Base.invokelatest(plt.subplot, nrows, 3, (idx - 1) * 3 + 1)
+        xr, yr = valid_xy(metrics.params, metrics.ratio)
+        if !isempty(xr)
+            ax1.plot(xr, clamp_vec(yr, Y_MIN_RATIO, Y_MAX_RATIO); marker="o", linewidth=1.5)
+        end
+        ax1.set_xscale("log")
+        ax1.set_yscale("log")
+        ax1.set_ylim(Y_MIN_RATIO, Y_MAX_RATIO)
+        ax1.grid(true, which="both", alpha=1.0)
+        ax1.set_ylabel(short_label(group.label; maxlen=28))
+        idx == 1 && ax1.set_title("Ratio")
+
+        ax2 = Base.invokelatest(plt.subplot, nrows, 3, (idx - 1) * 3 + 2)
+        ax2.plot(metrics.params, metrics.divergence; marker="o", linewidth=1.5, color="red")
+        ax2.set_xscale("log")
+        ax2.set_ylim(-0.05, 1.05)
+        ax2.grid(true, which="both", alpha=1.0)
+        idx == 1 && ax2.set_title("Divergence")
+
+        ax3 = Base.invokelatest(plt.subplot, nrows, 3, (idx - 1) * 3 + 3)
+        xo, yo = valid_xy(metrics.params, metrics.objA)
+        if !isempty(xo)
+            ax3.plot(xo, clamp_vec(yo, Y_MIN_OBJ, Y_MAX_OBJ); marker="o", linewidth=1.5, color="purple")
+        end
+        ax3.set_xscale("log")
+        ax3.set_yscale("log")
+        ax3.set_ylim(Y_MIN_OBJ, Y_MAX_OBJ)
+        ax3.grid(true, which="both", alpha=1.0)
+        idx == 1 && ax3.set_title("Suboptimality")
+
+        if idx == nrows
+            ax1.set_xlabel(group.param_name)
+            ax2.set_xlabel(group.param_name)
+            ax3.set_xlabel(group.param_name)
+        end
+    end
+    plt.tight_layout()
+    outpath = joinpath(plot_dir, @sprintf("%s__compact__rows-c.eps", env_name))
+    _safe_savefig(plt, outpath)
+    Base.invokelatest(plt.close)
+    println(@sprintf("  - %s: compact grid", basename(outpath)))
 end
 
 function plot_learning_curve_grid(outdir::AbstractString)
-    if !HAVE_PYPLOT
-        @error "PyPlot not available. Install via: using Pkg; Pkg.add(\"PyPlot\")"
-        return
-    end
-
+    env_name, groups = collect_groups(outdir)
+    isempty(groups) && return
+    HAVE_PYPLOT || return
     plt = plt_global
-
-    # Re-discover aggregated alpha files
-    files = filter(f->occursin("alpha_", f) && endswith(f, ".csv") && !occursin("_runs_", f), readdir(outdir; join=true))
-    isempty(files) && error("No aggregated alpha_*.csv files found in $outdir")
-
-    # Local parser for alpha/scale/eigen from filename
-    function parse_alpha_param(path)
-        meta = parse_alpha_filename(path)
-        return meta.param, meta.scale, meta.eigen, meta.kappa
-    end
-
-    # Select at most 2 alphas per decade bucket
-    function select_alpha_subset(files::Vector{String})
-        pairs = [(parse_alpha_param(f)[1], f) for f in files]
-        sort!(pairs, by=x->x[1])
-        buckets = Dict{Int, Vector{Tuple{Float64,String}}}()
-        for p in pairs
-            a = p[1]
-            b = floor(Int, log10(a))
-            push!(get!(buckets, b, Tuple{Float64,String}[]), p)
-        end
-        selected = Tuple{Float64,String}[]
-        for b in sort(collect(keys(buckets)))
-            arr = buckets[b]
-            sort!(arr, by=x->x[1])
-            if length(arr) >= 2
-                push!(selected, first(arr))
-                push!(selected, last(arr))
-            else
-                append!(selected, arr)
-            end
-        end
-        sort!(selected, by=x->x[1])
-        return selected
-    end
-
-    # Read and downsample a single curve from CSV (idxcol: 2 for D, 3 for A)
-    function read_curve_downsampled(path::AbstractString, T::Int, idxcol::Int=2; maxpoints::Int=2000)
-        stride = max(1, cld(T, maxpoints))
-        ts = Int[]
-        ys = Float64[]
-        open(path, "r") do io
-            _ = readline(io)
-            idx = 0
-            for line in eachline(io)
-                if (idx % stride) == 0
-                    parts = split(chomp(line), ",")
-                    t = parse(Int, parts[1])
-                    y = if idxcol <= length(parts)
-                        try parse(Float64, parts[idxcol]) catch; NaN end
-                    else
-                        NaN
-                    end
-                    # Sanitize non-finite and overly large values to avoid dropping or infs on log plots
-                    y = sanitize_val(y)
-                    if y > 0
-                        push!(ts, t)
-                        push!(ys, y)
-                    end
-                end
-                idx += 1
-            end
-        end
-        return ts, ys
-    end
-
-    # Build mapping: eigen -> files and track condition numbers
-    eigen_map = Dict{Float64, Vector{String}}()
-    kappa_map = Dict{Float64, Float64}()
-    for f in files
-        _, _, lam, kap = parse_alpha_param(f)
-        push!(get!(eigen_map, lam, String[]), f)
-        if isfinite(kap)
-            kappa_map[lam] = kap
-        end
-    end
-
-    ek = sort(collect(keys(eigen_map)))
-    isempty(ek) && return
-
-    env_name = split(basename(outdir), "_")[1]
-    plot_dir = joinpath(outdir, "plots"); mkpath(plot_dir)
-
-    n = length(ek)
+    plot_dir = joinpath(outdir, "plots")
+    mkpath(plot_dir)
+    n = length(groups)
     ncols = max(1, ceil(Int, sqrt(n)))
     nrows = cld(n, ncols)
-    fig = Base.invokelatest(plt.figure)
-    fig.set_size_inches(5.0*ncols, 3.6*nrows)
     cmap = Base.invokelatest(plt.get_cmap, "tab10")
 
-    for (idx, lam) in enumerate(ek)
-        ax = Base.invokelatest(plt.subplot, nrows, ncols, idx)
-        cap = lambda_caption(lam, get(kappa_map, lam, NaN))
-        ax.set_title(latexstring(cap.latex), fontsize=10)
-        flist = eigen_map[lam]
-        _, lastrow = read_aggregated_csv(flist[1])
-        T = lastrow.t + 1
-        sel = select_alpha_subset(flist)
-        for (i, (a, f)) in enumerate(sel)
-            ts, ys = read_curve_downsampled(f, T, 2; maxpoints=parse(Int, get(ENV, "PLOT_MAX_POINTS", "200000")))
-            if !isempty(ts)
-                color = cmap((i-1) % 10 / 9)
-                pname = occursin("sched_theory", basename(f)) ? "c" : "alpha"
-                ax.plot(ts, ys; linewidth=1.2, label=@sprintf("%s=%.2e", pname, a), color=color)
+    for (suffix, idxcol, ylabel_text) in (("D", 2, "D objective"), ("A", 3, "A objective"))
+        fig = Base.invokelatest(plt.figure)
+        fig.set_size_inches(5.0 * ncols, 3.8 * nrows)
+        for (idx, group) in enumerate(groups)
+            ax = Base.invokelatest(plt.subplot, nrows, ncols, idx)
+            selected = select_param_subset(group.entries)
+            for (j, (param, path)) in enumerate(selected)
+                xs, ys = read_curve_downsampled(path, idxcol; maxpoints=try parse(Int, get(ENV, "PLOT_MAX_POINTS", "2000")) catch; 2000 end)
+                if !isempty(xs)
+                    color = cmap((j - 1) % 10 / 9)
+                    ax.plot(xs, ys; linewidth=1.2, label=@sprintf("%s=%.2e", group.param_name, param), color=color)
+                end
+            end
+            ax.set_yscale("log")
+            ax.set_ylim(CURVE_MIN_OBJ, CURVE_MAX_OBJ)
+            ax.grid(true, which="both", alpha=1.0)
+            ax.set_xlabel("t")
+            ax.set_title(short_label(group.label; maxlen=36), fontsize=9)
+            if idx == 1
+                ax.legend(loc="best", fontsize=7)
             end
         end
-        ax.set_yscale("log")
-        ax.grid(true, alpha=1.0, which="both")
-        ax.set_xlabel("t", fontsize=9)
-        ax.set_ylabel(L"(1-\gamma)\,E[\| V_{\bar{\theta}_t} - V_{\theta^*} \|^2_D]", fontsize=9)
-        ax.set_ylim(CURVE_MIN_OBJ, CURVE_MAX_OBJ)
-        ax.set_xlim(0, max(T - 1, 1))
-        if idx == 1
-            ax.legend(loc="best", fontsize=7, ncol=2)
-        end
+        plt.suptitle(@sprintf("%s learning curves (%s)", uppercase(env_name), suffix), fontsize=14)
+        plt.tight_layout()
+        outpath = joinpath(plot_dir, @sprintf("%s_learning_curves_grid_%s.eps", env_name, suffix))
+        _safe_savefig(plt, outpath)
+        Base.invokelatest(plt.close)
+        println(@sprintf("  - %s: learning curves", basename(outpath)))
     end
-
-    plt.suptitle(@sprintf("%s: Learning Curves by Eigen", uppercase(env_name)), fontsize=14)
-    plt.tight_layout()
-    outpng = joinpath(plot_dir, @sprintf("%s_learning_curves_grid_D.eps", env_name))
-    _safe_savefig(plt, outpng)
-    Base.invokelatest(plt.close)
-
-    # Suboptimality gap grid
-    figA = Base.invokelatest(plt.figure)
-    figA.set_size_inches(5.0*ncols, 3.6*nrows)
-    for (idx, lam) in enumerate(ek)
-        ax = Base.invokelatest(plt.subplot, nrows, ncols, idx)
-        cap = lambda_caption(lam, get(kappa_map, lam, NaN))
-        ax.set_title(latexstring(cap.latex), fontsize=10)
-        flist = eigen_map[lam]
-        _, lastrow = read_aggregated_csv(flist[1])
-        T = lastrow.t + 1
-        sel = select_alpha_subset(flist)
-        for (i, (a, f)) in enumerate(sel)
-            ts, ys = read_curve_downsampled(f, T, 3; maxpoints=parse(Int, get(ENV, "PLOT_MAX_POINTS", "200000")))
-            if !isempty(ts)
-                color = cmap((i-1) % 10 / 9)
-                pname = occursin("sched_theory", basename(f)) ? "c" : "alpha"
-                ax.plot(ts, ys; linewidth=1.2, label=@sprintf("%s=%.2e", pname, a), color=color)
-            end
-        end
-        ax.set_yscale("log")
-        ax.grid(true, alpha=1.0, which="both")
-        ax.set_xlabel("t", fontsize=9)
-        ax.set_ylabel(L"(1-\gamma)\,E[\| V_{\bar{\theta}_t} - V_{\theta^*} \|^2_D] + \gamma\,E[\| V_{\bar{\theta}_t} - V_{\theta^*} \|^2_{\mathrm{Dirichlet}}]", fontsize=9)
-        ax.set_ylim(CURVE_MIN_OBJ, CURVE_MAX_OBJ)
-        ax.set_xlim(0, max(T - 1, 1))
-        if idx == 1
-            ax.legend(loc="best", fontsize=7, ncol=2)
-        end
-    end
-    plt.suptitle(@sprintf("%s: Learning Curves by Eigen (A)", uppercase(env_name)), fontsize=14)
-    plt.tight_layout()
-    outpngA = joinpath(plot_dir, @sprintf("%s_learning_curves_grid_A.eps", env_name))
-    _safe_savefig(plt, outpngA)
-    Base.invokelatest(plt.close)
-    println(@sprintf("  - %s: Learning curves grid across eigen", basename(outpng)))
 end
 
-# Plot a single figure of learning curves on log-log axes where, for each eigenvalue,
-# we select the best parameter (alpha or c) based on the final-time combined objective
-# (1-γ)E[||V̄_T - V*||²_D] + γ E[||V̄_T - V*||²_{Dirichlet}], and draw that curve.
-function plot_best_learning_curves_by_param(outdir::AbstractString; sweeptype::Symbol=:alpha)
-    if !HAVE_PYPLOT
-        @warn "PyPlot not available. Install via: using Pkg; Pkg.add(\"PyPlot\")"
-        return
-    end
-
+function plot_best_learning_curves_by_param(outdir::AbstractString; sweeptype::Symbol=:c)
+    env_name, groups = collect_groups(outdir)
+    isempty(groups) && return
+    HAVE_PYPLOT || return
     plt = plt_global
-
-    # Discover files by sweep type
-    allcsv = filter(f->endswith(f, ".csv") && !occursin("_runs_", f), readdir(outdir; join=true))
-    files = if sweeptype == :alpha
-        filter(f->occursin("alpha_", f) && !occursin("sched_theory", f), allcsv)
-    elseif sweeptype == :c
-        # theory schedule files reuse the alpha_ prefix but include "sched_theory"
-        filter(f->occursin("alpha_", f) && occursin("sched_theory", f), allcsv)
-    else
-        error("Unknown sweeptype: $(sweeptype)")
-    end
-    isempty(files) && @warn "No aggregated CSV files found for $(sweeptype) in $(outdir)" && return
-
-    # Local parsers
-    parse_param_lam = function(path::AbstractString)
-        base = split(basename(path), ".csv")[1]
-        parts = split(base, "_")
-        # pattern: alpha_<val>[_sched_theory]_scale_<val>_eigen_<lam>
-        pval = parse(Float64, parts[2])
-        lam  = parse(Float64, parts[end-2])
-        return pval, lam
-    end
-
-    # Group by eigenvalue
-    bylam = Dict{Float64, Vector{String}}()
-    for f in files
-        _, lam = parse_param_lam(f)
-        push!(get!(bylam, lam, String[]), f)
-    end
-
-    # Choose best file per eigen based on final-time combined objective
-    best_for = Dict{Float64, String}()
-    for (lam, flist) in bylam
-        bestf = nothing
-        besty = Inf
-        for f in flist
-            _, last = read_aggregated_csv(f)
-            y = sanitize_val(getfield(last, :avg_vbar) + getfield(last, :avg_vbar_A))
-            if y < besty
-                besty = y
-                bestf = f
-            end
-        end
-        if bestf !== nothing
-            best_for[lam] = bestf
-        end
-    end
-    isempty(best_for) && @warn "No best files selected for $(sweeptype) in $(outdir)" && return
-
-    # Helper to read combined (D+A) curve with downsampling
-    function read_combo_curve_downsampled(path::AbstractString; maxpoints::Int=2000)
-        n = 0
-        open(path, "r") do io
-            _ = readline(io)
-            for _ in eachline(io)
-                n += 1
-            end
-        end
-        n == 0 && return Float64[], Float64[]
-        stride = max(1, cld(n, maxpoints))
-        ts = Float64[]
-        ys = Float64[]
-        idx = 0
-        open(path, "r") do io
-            _ = readline(io)
-            for line in eachline(io)
-                if (idx % stride) == 0
-                    parts = split(chomp(line), ",")
-                    if length(parts) >= 3
-                        t = parse(Int, parts[1])
-                        yD = try parse(Float64, parts[2]) catch; NaN end
-                        yA = try parse(Float64, parts[3]) catch; NaN end
-                        y  = sanitize_val(yD + yA)
-                        push!(ts, float(t + 1))
-                        push!(ys, y)
-                    end
-                end
-                idx += 1
-            end
-        end
-        return ts, ys
-    end
-
-    env_name = split(basename(outdir), "_")[1]
-    plot_dir = joinpath(outdir, "plots"); isdir(plot_dir) || mkpath(plot_dir)
-
+    plot_dir = joinpath(outdir, "plots")
+    mkpath(plot_dir)
     fig = Base.invokelatest(plt.figure)
     fig.set_size_inches(9, 6)
     ax = Base.invokelatest(plt.gca)
-
-    # Plot one curve per eigenvalue
-    for lam in sort(collect(keys(best_for)))
-        f = best_for[lam]
-        xs, ys = read_combo_curve_downsampled(f; maxpoints=try parse(Int, get(ENV, "PLOT_MAX_POINTS", "2000")) catch; 2000 end)
-        # Filter positive for log-log
-        xv = Float64[]; yv = Float64[]
-        @inbounds for i in eachindex(xs)
-            xi = xs[i]; yi = ys[i]
-            if isfinite(xi) && isfinite(yi) && xi > 0 && yi > 0
-                push!(xv, xi)
-                push!(yv, yi)
+    for group in groups
+        best_path = nothing
+        best_score = Inf
+        for entry in group.entries
+            _, lastrow = read_aggregated_csv(entry.agg_path)
+            score = sanitize_val(lastrow.avg_vbar + lastrow.avg_vbar_A)
+            if score < best_score
+                best_score = score
+                best_path = entry.agg_path
             end
         end
+        best_path === nothing && continue
+        xs, ys = read_combo_curve_downsampled(best_path; maxpoints=try parse(Int, get(ENV, "PLOT_MAX_POINTS", "2000")) catch; 2000 end)
+        xv, yv = valid_xy(xs, ys)
         if !isempty(xv)
-            ax.plot(xv, yv; linewidth=2.0, label=@sprintf("\u03BB=%.2e", lam))
+            ax.plot(xv, yv; linewidth=1.8, label=short_label(group.label; maxlen=32))
         end
     end
-
-    ax.set_xscale("log"); ax.set_yscale("log")
+    ax.set_xscale("log")
+    ax.set_yscale("log")
     ax.set_ylim(CURVE_MIN_OBJ, CURVE_MAX_OBJ)
-    ax.grid(true, alpha=1.0, which="both")
-    ax.set_xlabel(L"time\ steps\ t")
-    ax.set_ylabel(L"(1-\gamma)\,\mathbb{E}[\|\bar V_T - V^*\|^2_D] + \gamma\,\mathbb{E}[\|\bar V_T - V^*\|^2_{Dirichlet}]")
+    ax.grid(true, which="both", alpha=1.0)
+    ax.set_xlabel("time steps t")
+    ax.set_ylabel("best combined objective")
     ax.legend(loc="best", fontsize=8)
-
-    title_s = sweeptype == :alpha ? "alpha" : "c"
-    plt.suptitle(@sprintf("%s: Best Learning Curves per Eigen (by %s)", uppercase(env_name), title_s), fontsize=14)
-    outpng = joinpath(plot_dir, @sprintf("%s__bestcurves__by-%s.eps", env_name, title_s))
-    _safe_savefig(plt, outpng)
+    plt.tight_layout()
+    label = sweeptype == :alpha ? "alpha" : "c"
+    outpath = joinpath(plot_dir, @sprintf("%s__bestcurves__by-%s.eps", env_name, label))
+    _safe_savefig(plt, outpath)
     Base.invokelatest(plt.close)
-    println(@sprintf("  - %s: Best curves by %s", basename(outpng), title_s))
+    println(@sprintf("  - %s: best curves", basename(outpath)))
 end
+
 plot_best_learning_curves_alpha(outdir::AbstractString) = plot_best_learning_curves_by_param(outdir; sweeptype=:alpha)
-plot_best_learning_curves_c(outdir::AbstractString)     = plot_best_learning_curves_by_param(outdir; sweeptype=:c)
+plot_best_learning_curves_c(outdir::AbstractString) = plot_best_learning_curves_by_param(outdir; sweeptype=:c)
 
 if abspath(PROGRAM_FILE) == @__FILE__
     cfg = parse_args(ARGS)
     outdir = cfg.dir
     plot_divergence(outdir)
-    try
-        plot_learning_curve_grid(outdir)
-        if isdefined(Main, :plot_big_final_grid)
-            plot_big_final_grid(outdir)
-        end
-        if isdefined(Main, :plot_compact_c_grid)
-            plot_compact_c_grid(outdir; gamma_override=cfg.gamma_override)
-        end
-    catch e
-        @warn "Learning-curves grid failed" exception=(e, catch_backtrace())
-    end
+    plot_learning_curve_grid(outdir)
+    plot_big_final_grid(outdir)
+    plot_compact_c_grid(outdir)
+    plot_best_learning_curves_c(outdir)
 end
+

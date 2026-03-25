@@ -1,1 +1,6 @@
 /td_divergence_logs
+/_tools
+/smoke_e4_manifest
+/smoke_toy_manifest
+/td_run100k_report.html
+/run_all12_n100k_r16_t4_c10.ps1
