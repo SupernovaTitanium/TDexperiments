@@ -607,7 +607,30 @@ struct RunResult
     final_theta_norm::Float64
 end
 
+# Keep a dense prefix and then switch to logarithmic checkpoints so downstream
+# plots stay readable without materializing every timestep in memory.
+function checkpoint_indices(n_steps::Int; dense_prefix::Int=100, log_step_decades::Float64=0.01)
+    n_steps >= 1 || return Int[]
+
+    keep_prefix = min(n_steps, max(dense_prefix, 1))
+    checkpoints = collect(1:keep_prefix)
+    factor = 10.0^log_step_decades
+    last_t = keep_prefix
+
+    while last_t < n_steps
+        next_t = max(last_t + 1, ceil(Int, last_t * factor))
+        next_t = min(next_t, n_steps)
+        next_t == checkpoints[end] && break
+        push!(checkpoints, next_t)
+        last_t = next_t
+    end
+
+    checkpoints[end] == n_steps || push!(checkpoints, n_steps)
+    return checkpoints
+end
+
 function run_single_simulation(alpha::Float64, run_idx::Int, n_steps::Int,
+                               checkpoints::AbstractVector{<:Integer},
                                theta0::AbstractVector{<:Real}, env::FiniteTDEnv,
                                G::Matrix{Float64}, b::Vector{Float64}, c::Float64,
                                G_A::Matrix{Float64}, b_A::Vector{Float64}, c_A::Float64;
@@ -622,14 +645,19 @@ function run_single_simulation(alpha::Float64, run_idx::Int, n_steps::Int,
     @inbounds vf.w .= theta0
     theta_bar = zeros(Float64, d)
 
-    vbar_errs = zeros(Float64, n_steps)
-    vbar_errs_A = zeros(Float64, n_steps)
-    theta_norms = zeros(Float64, n_steps)
+    n_checkpoints = length(checkpoints)
+    vbar_errs = zeros(Float64, n_checkpoints)
+    vbar_errs_A = zeros(Float64, n_checkpoints)
+    theta_norms = zeros(Float64, n_checkpoints)
+    checkpoint_idx = 1
 
     s = reset!(env)
     diverged = false
     diverged_at = -1
     max_theta = 0.0
+    final_v = NaN
+    final_vA = NaN
+    final_theta = NaN
 
     phi_max_sq = 0.0
     @inbounds for ii in 1:env.n_states
@@ -697,9 +725,15 @@ function run_single_simulation(alpha::Float64, run_idx::Int, n_steps::Int,
             max_theta = theta_n2
         end
 
-        vbar_errs[t] = vbar
-        vbar_errs_A[t] = vbarA
-        theta_norms[t] = theta_n2
+        final_v = vbar
+        final_vA = vbarA
+        final_theta = theta_n2
+        if checkpoint_idx <= n_checkpoints && t == checkpoints[checkpoint_idx]
+            vbar_errs[checkpoint_idx] = vbar
+            vbar_errs_A[checkpoint_idx] = vbarA
+            theta_norms[checkpoint_idx] = theta_n2
+            checkpoint_idx += 1
+        end
 
         if theta_n2 > 1.0e12 || !isfinite(theta_n2)
             diverged = true
@@ -709,23 +743,24 @@ function run_single_simulation(alpha::Float64, run_idx::Int, n_steps::Int,
         s = s_next
     end
 
-    final_v = diverged ? Inf : vbar_errs[end]
-    final_vA = diverged ? Inf : vbar_errs_A[end]
-    final_theta = diverged ? Inf : theta_norms[end]
+    final_v = diverged ? Inf : final_v
+    final_vA = diverged ? Inf : final_vA
+    final_theta = diverged ? Inf : final_theta
     return RunResult(run_idx, diverged, diverged_at, vbar_errs, vbar_errs_A, theta_norms, max_theta, final_v, final_vA, final_theta)
 end
 
-function aggregate_results(results::Vector{RunResult}, n_steps::Int)
+function aggregate_results(results::Vector{RunResult}, checkpoints::AbstractVector{<:Integer})
     n_runs = length(results)
     nT = Threads.nthreads()
+    n_checkpoints = length(checkpoints)
 
-    sums_vbar = [zeros(Float64, n_steps) for _ in 1:nT]
-    sums_vbar2 = [zeros(Float64, n_steps) for _ in 1:nT]
-    sums_vbar_A = [zeros(Float64, n_steps) for _ in 1:nT]
-    sums_vbar_A2 = [zeros(Float64, n_steps) for _ in 1:nT]
-    sums_theta = [zeros(Float64, n_steps) for _ in 1:nT]
-    sums_theta2 = [zeros(Float64, n_steps) for _ in 1:nT]
-    counts = [zeros(Int32, n_steps) for _ in 1:nT]
+    sums_vbar = [zeros(Float64, n_checkpoints) for _ in 1:nT]
+    sums_vbar2 = [zeros(Float64, n_checkpoints) for _ in 1:nT]
+    sums_vbar_A = [zeros(Float64, n_checkpoints) for _ in 1:nT]
+    sums_vbar_A2 = [zeros(Float64, n_checkpoints) for _ in 1:nT]
+    sums_theta = [zeros(Float64, n_checkpoints) for _ in 1:nT]
+    sums_theta2 = [zeros(Float64, n_checkpoints) for _ in 1:nT]
+    counts = [zeros(Int32, n_checkpoints) for _ in 1:nT]
 
     Threads.@threads for i in 1:n_runs
         tid = threadid()
@@ -740,56 +775,56 @@ function aggregate_results(results::Vector{RunResult}, n_steps::Int)
         st = sums_theta[tid]
         st2 = sums_theta2[tid]
         ct = counts[tid]
-        @inbounds @simd for t in 1:n_steps
-            v = vb[t]
-            sv[t] += v
-            sv2[t] += v * v
-            sva[t] += vba[t]
-            sva2[t] += vba[t] * vba[t]
-            st[t] += th[t]
-            st2[t] += th[t] * th[t]
-            ct[t] += 1
+        @inbounds @simd for idx in 1:n_checkpoints
+            v = vb[idx]
+            sv[idx] += v
+            sv2[idx] += v * v
+            sva[idx] += vba[idx]
+            sva2[idx] += vba[idx] * vba[idx]
+            st[idx] += th[idx]
+            st2[idx] += th[idx] * th[idx]
+            ct[idx] += 1
         end
     end
 
-    avg_vbar = Vector{Float64}(undef, n_steps)
-    std_vbar = Vector{Float64}(undef, n_steps)
-    avg_vbar_A = Vector{Float64}(undef, n_steps)
-    std_vbar_A = Vector{Float64}(undef, n_steps)
-    avg_theta_norms = Vector{Float64}(undef, n_steps)
-    std_theta_norms = Vector{Float64}(undef, n_steps)
+    avg_vbar = Vector{Float64}(undef, n_checkpoints)
+    std_vbar = Vector{Float64}(undef, n_checkpoints)
+    avg_vbar_A = Vector{Float64}(undef, n_checkpoints)
+    std_vbar_A = Vector{Float64}(undef, n_checkpoints)
+    avg_theta_norms = Vector{Float64}(undef, n_checkpoints)
+    std_theta_norms = Vector{Float64}(undef, n_checkpoints)
 
-    @inbounds for t in 1:n_steps
+    @inbounds for idx in 1:n_checkpoints
         sv = 0.0
         svsq = 0.0
         st = 0.0
         stsq = 0.0
         cnt = 0
         @inbounds @simd for k in 1:nT
-            sv += sums_vbar[k][t]
-            svsq += sums_vbar2[k][t]
-            st += sums_theta[k][t]
-            stsq += sums_theta2[k][t]
-            cnt += counts[k][t]
+            sv += sums_vbar[k][idx]
+            svsq += sums_vbar2[k][idx]
+            st += sums_theta[k][idx]
+            stsq += sums_theta2[k][idx]
+            cnt += counts[k][idx]
         end
         av = sv / max(cnt, 1)
         ava = 0.0
         avasq = 0.0
         @inbounds @simd for k in 1:nT
-            ava += sums_vbar_A[k][t]
-            avasq += sums_vbar_A2[k][t]
+            ava += sums_vbar_A[k][idx]
+            avasq += sums_vbar_A2[k][idx]
         end
         ava /= max(cnt, 1)
         ex2 = svsq / max(cnt, 1)
-        std_vbar[t] = sqrt(max(0.0, ex2 - av * av))
+        std_vbar[idx] = sqrt(max(0.0, ex2 - av * av))
         ea2 = avasq / max(cnt, 1)
-        std_vbar_A[t] = sqrt(max(0.0, ea2 - ava * ava))
+        std_vbar_A[idx] = sqrt(max(0.0, ea2 - ava * ava))
         at = st / max(cnt, 1)
         ea2_theta = stsq / max(cnt, 1)
-        std_theta_norms[t] = sqrt(max(0.0, ea2_theta - at * at))
-        avg_vbar[t] = av
-        avg_vbar_A[t] = ava
-        avg_theta_norms[t] = at
+        std_theta_norms[idx] = sqrt(max(0.0, ea2_theta - at * at))
+        avg_vbar[idx] = av
+        avg_vbar_A[idx] = ava
+        avg_theta_norms[idx] = at
     end
 
     t0 = findmax(avg_theta_norms)[2]
@@ -797,7 +832,7 @@ function aggregate_results(results::Vector{RunResult}, n_steps::Int)
     max_std_theta = std_theta_norms[t0]
     diverged_count = count(r -> r.diverged, results)
 
-    return (; avg_vbar, std_vbar, avg_vbar_A, std_vbar_A, avg_theta_norms, max_avg_theta, max_std_theta,
+    return (; timesteps=Int[checkpoints...], avg_vbar, std_vbar, avg_vbar_A, std_vbar_A, avg_theta_norms, max_avg_theta, max_std_theta,
               diverged=diverged_count, divergence_rate=diverged_count / max(n_runs, 1))
 end
 

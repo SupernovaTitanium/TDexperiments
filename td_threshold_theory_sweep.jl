@@ -203,29 +203,15 @@ function serialize_metadata(env)
     return join(pairs, ";")
 end
 
-function downsample_mask(n_steps::Int)
-    keep = trues(n_steps)
-    t_temp = 100
-    for t in 101:n_steps
-        if t <= t_temp * 10^0.01
-            keep[t] = false
-        else
-            t_temp = t
-        end
-    end
-    return keep
-end
-
 function write_aggregated_csv(path::AbstractString, agg, n_steps::Int, lambda_min::Float64, kappa::Float64, gamma::Float64, theta_star_sq::Float64)
-    keep = downsample_mask(n_steps)
+    isempty(agg.timesteps) && error("No checkpoint rows available for $path")
+    agg.timesteps[end] == n_steps || error("Final checkpoint $(agg.timesteps[end]) does not match n_steps=$n_steps")
     open(path, "w") do io
         println(io, "timestep,E_D[||Vbar_t - V*||^2],E_A[||Vbar_t - V*||^2],E[||theta_t||^2],max_i<=T ||theta_i||^2,||theta^*||^2,std_D,std_A,std_max_theta,lambda_min,kappa,gamma")
-        for t in 1:n_steps
-            if keep[t]
-                @printf(io, "%d,%.12g,%.12g,%.12g,%.12g,%.12g,%.12g,%.12g,%.12g,%.12g,%.12g,%.12g\n",
-                        t, agg.avg_vbar[t], agg.avg_vbar_A[t], agg.avg_theta_norms[t], agg.max_avg_theta,
-                        theta_star_sq, agg.std_vbar[t], agg.std_vbar_A[t], agg.max_std_theta, lambda_min, kappa, gamma)
-            end
+        for (idx, t) in enumerate(agg.timesteps)
+            @printf(io, "%d,%.12g,%.12g,%.12g,%.12g,%.12g,%.12g,%.12g,%.12g,%.12g,%.12g,%.12g\n",
+                    t, agg.avg_vbar[idx], agg.avg_vbar_A[idx], agg.avg_theta_norms[idx], agg.max_avg_theta,
+                    theta_star_sq, agg.std_vbar[idx], agg.std_vbar_A[idx], agg.max_std_theta, lambda_min, kappa, gamma)
         end
     end
 end
@@ -254,6 +240,7 @@ end
 function main()
     cfg = parse_args(ARGS)
     env_id = TDThreshold.canonical_env_id(cfg.env_id)
+    checkpoints = TDThreshold.checkpoint_indices(cfg.n_steps)
     base = cfg.outroot
     if startswith(basename(base), string(env_id, "_"))
         outdir = base
@@ -297,12 +284,12 @@ function main()
                 @printf("  c=%.3e ...\n", cval)
                 runs = Vector{TDThreshold.RunResult}(undef, cfg.n_runs)
                 Threads.@threads for run in 1:cfg.n_runs
-                    runs[run] = TDThreshold.run_single_simulation(cval, run, cfg.n_steps, theta0, env,
+                    runs[run] = TDThreshold.run_single_simulation(cval, run, cfg.n_steps, checkpoints, theta0, env,
                         metrics.G, metrics.b, metrics.c, metrics.G_A, metrics.b_A, metrics.c_A;
                         schedule=:theory, c_param=cval)
                 end
 
-                agg = TDThreshold.aggregate_results(runs, cfg.n_steps)
+                agg = TDThreshold.aggregate_results(runs, checkpoints)
                 agg_name = @sprintf("alpha_%.2e_sched_theory_case_%s.csv", cval, cid)
                 run_name = @sprintf("alpha_%.2e_runs_sched_theory_case_%s.csv", cval, cid)
                 agg_path = joinpath(outdir, agg_name)
