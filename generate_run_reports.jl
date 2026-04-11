@@ -3,16 +3,19 @@
 using Dates
 using Printf
 using Statistics
+using Base64
 
 const STABILITY_WINDOW_SECONDS = 90
 const MAX_ENV_BADGES = 6
 
 function print_help()
-    println("Usage: julia $(basename(@__FILE__)) --root td_divergence_logs")
+    println("Usage: julia $(basename(@__FILE__)) --root td_divergence_logs [--embed-images|--no-embed-images] [--embed-reports-in-index]")
 end
 
 function parse_args(args)
     root = nothing
+    embed_images = true
+    embed_reports_in_index = false
     i = 1
     while i <= length(args)
         arg = args[i]
@@ -23,12 +26,24 @@ function parse_args(args)
             root = args[i + 1]
             i += 2
             continue
+        elseif arg == "--embed-images"
+            embed_images = true
+            i += 1
+            continue
+        elseif arg == "--no-embed-images"
+            embed_images = false
+            i += 1
+            continue
+        elseif arg == "--embed-reports-in-index"
+            embed_reports_in_index = true
+            i += 1
+            continue
         else
             error("Unknown or incomplete argument: $(arg)")
         end
     end
     root === nothing && error("Missing required --root")
-    return abspath(root)
+    return (root=abspath(root), embed_images=embed_images, embed_reports_in_index=embed_reports_in_index)
 end
 
 esc_html(x) = replace(replace(replace(replace(replace(String(x), '&' => "&amp;"), '<' => "&lt;"), '>' => "&gt;"), '"' => "&quot;"), '\'' => "&#39;")
@@ -617,11 +632,51 @@ function file_links(paths, base_dir)
     return "<details><summary>$(length(items)) files</summary><ul class='file-list'>$(join(items, ""))</ul></details>"
 end
 
-function plot_card(card, run_dir)
-    img = !isempty(card["src"]) ? "<img loading='lazy' src='$(url_path(relpath(card["src"], run_dir)))' alt='$(esc_html(card["base"]))'>" : "<div class='image-warning'>PNG unavailable for inline display.</div>"
+function mime_type_for_path(path::AbstractString)
+    ext = lowercase(splitext(path)[2])
+    if ext == ".png"
+        return "image/png"
+    elseif ext in (".jpg", ".jpeg")
+        return "image/jpeg"
+    elseif ext == ".gif"
+        return "image/gif"
+    elseif ext == ".svg"
+        return "image/svg+xml"
+    elseif ext == ".eps"
+        return "application/postscript"
+    elseif ext == ".html"
+        return "text/html;charset=utf-8"
+    end
+    return "application/octet-stream"
+end
+
+function data_uri(path::AbstractString, cache::Dict{String,String}; mime::Union{Nothing,String}=nothing)
+    full = abspath(path)
+    haskey(cache, full) && return cache[full]
+    resolved_mime = mime === nothing ? mime_type_for_path(full) : mime
+    uri = "data:$(resolved_mime);base64,$(base64encode(read(full)))"
+    cache[full] = uri
+    return uri
+end
+
+function plot_card(card, run_dir; embed_images::Bool=false, uri_cache::Dict{String,String}=Dict{String,String}())
+    img = if !isempty(card["src"])
+        src = embed_images ? data_uri(card["src"], uri_cache) : url_path(relpath(card["src"], run_dir))
+        "<img loading='lazy' src='$(esc_html(src))' alt='$(esc_html(card["base"]))'>"
+    else
+        "<div class='image-warning'>PNG unavailable for inline display.</div>"
+    end
     links = String[]
-    !isempty(card["png"]) && push!(links, "<a href='$(url_path(relpath(card["png"], run_dir)))'>PNG</a>")
-    !isempty(card["eps"]) && push!(links, "<a href='$(url_path(relpath(card["eps"], run_dir)))'>EPS</a>")
+    if !isempty(card["png"])
+        href = embed_images ? data_uri(card["png"], uri_cache) : url_path(relpath(card["png"], run_dir))
+        dl = embed_images ? " download='$(esc_html(basename(card["png"])))'" : ""
+        push!(links, "<a href='$(esc_html(href))'$(dl)>PNG</a>")
+    end
+    if !isempty(card["eps"])
+        href = embed_images ? data_uri(card["eps"], uri_cache) : url_path(relpath(card["eps"], run_dir))
+        dl = embed_images ? " download='$(esc_html(basename(card["eps"])))'" : ""
+        push!(links, "<a href='$(esc_html(href))'$(dl)>EPS</a>")
+    end
     cset = isempty(card["c"]) ? "" : join(fmt_short.(sort(unique(card["c"]))), "|")
     info = ["<span class='badge'><code>$(esc_html(card["label"]))</code></span>"]
     if card["case_id"] != "global"
@@ -635,11 +690,24 @@ function plot_card(card, run_dir)
     return "<article class='plot-card' data-gallery-card='1' data-search='$(esc_html(card["search"]))' data-plot-type='$(esc_html(card["type"]))' data-case-id='$(esc_html(card["case_id"]))' data-objective='$(esc_html(card["obj"]))' data-c-values='$(esc_html(cset))'><div class='plot-head'><h3>$(esc_html(card["case_label"]))</h3><div class='plot-file'><code>$(esc_html(card["base"]))</code></div></div><div class='badge-row'>$(join(info, " "))</div>$(warn)$(img)<div class='plot-links'>$(isempty(links) ? "<span class='muted'>no file links</span>" : join(links, " · "))</div></article>"
 end
 
-function global_card(card, run_dir)
-    img = !isempty(card["src"]) ? "<img loading='lazy' src='$(url_path(relpath(card["src"], run_dir)))' alt='$(esc_html(card["base"]))'>" : "<div class='image-warning'>PNG unavailable for inline display.</div>"
+function global_card(card, run_dir; embed_images::Bool=false, uri_cache::Dict{String,String}=Dict{String,String}())
+    img = if !isempty(card["src"])
+        src = embed_images ? data_uri(card["src"], uri_cache) : url_path(relpath(card["src"], run_dir))
+        "<img loading='lazy' src='$(esc_html(src))' alt='$(esc_html(card["base"]))'>"
+    else
+        "<div class='image-warning'>PNG unavailable for inline display.</div>"
+    end
     links = String[]
-    !isempty(card["png"]) && push!(links, "<a href='$(url_path(relpath(card["png"], run_dir)))'>PNG</a>")
-    !isempty(card["eps"]) && push!(links, "<a href='$(url_path(relpath(card["eps"], run_dir)))'>EPS</a>")
+    if !isempty(card["png"])
+        href = embed_images ? data_uri(card["png"], uri_cache) : url_path(relpath(card["png"], run_dir))
+        dl = embed_images ? " download='$(esc_html(basename(card["png"])))'" : ""
+        push!(links, "<a href='$(esc_html(href))'$(dl)>PNG</a>")
+    end
+    if !isempty(card["eps"])
+        href = embed_images ? data_uri(card["eps"], uri_cache) : url_path(relpath(card["eps"], run_dir))
+        dl = embed_images ? " download='$(esc_html(basename(card["eps"])))'" : ""
+        push!(links, "<a href='$(esc_html(href))'$(dl)>EPS</a>")
+    end
     return "<article class='global-card'><div class='plot-head'><h3>$(esc_html(card["label"]))</h3><div class='plot-file'><code>$(esc_html(card["base"]))</code></div></div>$(img)<div class='plot-links'>$(isempty(links) ? "<span class='muted'>no file links</span>" : join(links, " · "))</div></article>"
 end
 
@@ -681,7 +749,7 @@ end
 const REPORT_STYLE = "<style>:root{--bg:#f5f0e8;--ink:#1b1b18;--muted:#5e5a53;--card:#fffdf8;--line:#d9cbb8;--accent:#8e3b1b;--chip:#f8f2ea;--shadow:0 14px 40px rgba(62,43,30,.10);}*{box-sizing:border-box}html{scroll-behavior:smooth}body{margin:0;font-family:'Iowan Old Style','Palatino Linotype','Book Antiqua','Noto Serif TC',serif;background:radial-gradient(circle at top,#fffaf2 0%,#f5f0e8 48%,#efe7db 100%);color:var(--ink);line-height:1.55}a{color:var(--accent)}code{font-family:'Cascadia Mono','Consolas','SFMono-Regular',monospace;background:#f6eee4;border:1px solid #ead9c7;border-radius:6px;padding:.08rem .35rem}.page{max-width:1600px;margin:0 auto;padding:32px 24px 80px}.hero{padding:28px;border:1px solid var(--line);border-radius:26px;background:linear-gradient(135deg,#fffdf9 0%,#f8efe5 100%);box-shadow:var(--shadow)}.hero-top{display:flex;justify-content:space-between;gap:18px;align-items:flex-start;flex-wrap:wrap}.hero h1{margin:.1rem 0 .25rem;font-size:clamp(2rem,3vw,3.2rem);line-height:1.05}.subtle,.muted{color:var(--muted)}.pill{display:inline-flex;align-items:center;gap:.4rem;padding:.38rem .7rem;border-radius:999px;background:var(--chip);border:1px solid var(--line);margin:.15rem .3rem .15rem 0;font-size:.92rem}.hero-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:12px;margin-top:18px}.hero-stat{padding:14px;border-radius:18px;background:rgba(255,255,255,.8);border:1px solid var(--line)}.hero-stat .label{display:block;font-size:.84rem;color:var(--muted)}.hero-stat .value{display:block;font-size:1.18rem;font-weight:700;margin-top:6px}.section{margin-top:28px}.section h2{margin:0 0 14px;font-size:1.45rem}.table-wrap{overflow:auto;border:1px solid var(--line);border-radius:18px;background:var(--card);box-shadow:var(--shadow)}table{width:100%;border-collapse:collapse;font-size:.95rem}th,td{padding:12px 14px;border-bottom:1px solid #eadfce;vertical-align:top}th{text-align:left;background:#f8f2ea}tr:last-child td{border-bottom:none}.grid-2{display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:18px}.global-card,.plot-card,.note-card{background:var(--card);border:1px solid var(--line);border-radius:22px;padding:18px;box-shadow:var(--shadow)}.global-card img,.plot-card img{width:100%;height:auto;border-radius:16px;border:1px solid #e4d6c7;background:#fff}.plot-head{display:flex;justify-content:space-between;gap:12px;align-items:baseline;flex-wrap:wrap;margin-bottom:10px}.plot-head h3{margin:0;font-size:1.05rem}.plot-file{color:var(--muted);font-size:.82rem}.badge-row{display:flex;flex-wrap:wrap;gap:8px;margin:0 0 12px}.badge{display:inline-flex;align-items:center;padding:.26rem .55rem;border-radius:999px;background:var(--chip);border:1px solid var(--line);font-size:.8rem}.badge-plain{display:inline-flex;align-items:center;margin:.15rem .25rem .15rem 0}.callout{padding:12px 14px;border-radius:16px;border:1px solid var(--line);background:#fff9f3;margin-bottom:12px}.callout.warn{border-color:#d78f68;background:#fff2ea}.filters{position:sticky;top:10px;z-index:10;padding:16px;border:1px solid var(--line);border-radius:20px;background:rgba(255,251,245,.94);backdrop-filter:blur(10px);box-shadow:var(--shadow)}.filter-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px}.filter-grid label{display:flex;flex-direction:column;gap:6px;font-size:.88rem;color:var(--muted)}input,select{width:100%;padding:10px 12px;border-radius:12px;border:1px solid #d8c8b6;background:white;font:inherit;color:var(--ink)}.gallery{display:grid;grid-template-columns:repeat(auto-fit,minmax(360px,1fr));gap:18px}.image-warning{min-height:220px;display:grid;place-items:center;border-radius:16px;border:1px dashed #c9ae98;background:#fbf6ef;color:var(--muted);padding:18px;text-align:center}.plot-links{margin-top:10px;font-size:.9rem}.file-list{margin:.7rem 0 0;padding-left:1.2rem}.top-links{display:flex;flex-wrap:wrap;gap:10px}.tiny{font-size:.84rem}.unmatched{margin-top:22px}.summary-cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:14px}.summary-cards .note-card{min-height:100%}@media (max-width:720px){.page{padding:22px 14px 60px}.hero{padding:20px}.gallery{grid-template-columns:1fr}}</style>"
 
 const INDEX_STYLE = "<style>:root{--bg:#f6f1e8;--ink:#201d19;--muted:#5f594f;--card:#fffdf9;--line:#dccdb8;--accent:#8b3f1f;--shadow:0 18px 40px rgba(61,46,33,.10);}*{box-sizing:border-box}body{margin:0;font-family:'Iowan Old Style','Palatino Linotype','Book Antiqua','Noto Serif TC',serif;background:linear-gradient(180deg,#fffaf2 0%,#f6f1e8 42%,#efe7dc 100%);color:var(--ink)}a{color:var(--accent)}code{font-family:'Cascadia Mono','Consolas',monospace;background:#f6eee4;border:1px solid #ead9c7;border-radius:6px;padding:.08rem .35rem}.page{max-width:1500px;margin:0 auto;padding:32px 24px 80px}.hero{padding:28px;border-radius:26px;border:1px solid var(--line);background:linear-gradient(135deg,#fffdf9 0%,#f9efe5 100%);box-shadow:var(--shadow)}.hero h1{margin:0 0 .35rem;font-size:clamp(2.2rem,3.5vw,3.6rem)}.hero p{margin:0;color:var(--muted)}.hero-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px;margin-top:18px}.stat{padding:14px;border-radius:18px;border:1px solid var(--line);background:rgba(255,255,255,.82)}.stat .label{display:block;font-size:.84rem;color:var(--muted)}.stat .value{display:block;font-size:1.24rem;font-weight:700;margin-top:6px}.controls{position:sticky;top:12px;z-index:10;margin-top:24px;padding:16px;border-radius:20px;border:1px solid var(--line);background:rgba(255,251,245,.94);backdrop-filter:blur(10px);box-shadow:var(--shadow)}.control-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px}.control-grid label{display:flex;flex-direction:column;gap:6px;font-size:.88rem;color:var(--muted)}input,select{width:100%;padding:10px 12px;border-radius:12px;border:1px solid #d8c8b6;background:#fff;font:inherit;color:var(--ink)}.run-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:18px;margin-top:20px}.run-card{padding:18px;border-radius:22px;border:1px solid var(--line);background:var(--card);box-shadow:var(--shadow)}.run-card h2{margin:0 0 .2rem;font-size:1.18rem}.run-card .path{font-size:.86rem;color:var(--muted)}.meta{display:flex;flex-wrap:wrap;gap:8px;margin:12px 0}.badge{display:inline-flex;align-items:center;padding:.28rem .58rem;border-radius:999px;background:#f8f2ea;border:1px solid var(--line);font-size:.8rem}.run-metrics{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;margin-top:12px}.run-metrics .cell{padding:10px;border-radius:16px;background:#fcf7ef;border:1px solid #eadccc}.run-metrics .k{display:block;color:var(--muted);font-size:.78rem}.run-metrics .v{display:block;margin-top:5px;font-size:1rem;font-weight:700}.section{margin-top:30px}.note{padding:14px 16px;border-radius:18px;border:1px solid var(--line);background:#fff8f0;color:var(--muted)}.muted{color:var(--muted)}@media (max-width:720px){.page{padding:22px 14px 60px}.hero{padding:20px}}</style>"
-function build_run_report(run_dir, root)
+function build_run_report(run_dir, root; embed_images::Bool=false)
     format = isfile(joinpath(run_dir, "manifest.tsv")) ? :manifest : :legacy
     warn = String[]
     png = ensure_pngs(run_dir)
@@ -731,12 +799,14 @@ function build_run_report(run_dir, root)
         ("log", guess_log(run_dir) === nothing ? "absent" : basename(guess_log(run_dir)), guess_log(run_dir) === nothing ? "filesystem" : "log discovery"),
     ]
     report_path = joinpath(run_dir, "report.html")
+    uri_cache = Dict{String,String}()
     case_ids = sort(unique([c["case_id"] for c in gallery]))
     plot_types = sort(unique([c["type"] for c in gallery]))
     objectives = sort(unique([c["obj"] for c in gallery]))
     open(report_path, "w") do io
         print(io, "<!doctype html><html lang='zh-Hant'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width, initial-scale=1'><title>", esc_html(basename(run_dir)), " | TD Runs Report</title>", REPORT_STYLE, "</head><body><div class='page'>")
-        print(io, "<section class='hero'><div class='hero-top'><div><div class='top-links'><a class='pill' href='", url_path(relpath(joinpath(root, "index.html"), run_dir)), "'>Back to index</a><span class='pill'><code>", esc_html(relpath(run_dir, root)), "</code></span></div><h1>", esc_html(basename(run_dir)), "</h1><p class='subtle'>Static experiment viewer for local file browsing. Images are embedded directly in this page when PNGs are available.</p></div><div>")
+        hero_msg = embed_images ? "Static experiment viewer for local file browsing. PNG/EPS assets are embedded in this HTML." : "Static experiment viewer for local file browsing. Image files are loaded from plots/."
+        print(io, "<section class='hero'><div class='hero-top'><div><div class='top-links'><a class='pill' href='", url_path(relpath(joinpath(root, "index.html"), run_dir)), "'>Back to index</a><span class='pill'><code>", esc_html(relpath(run_dir, root)), "</code></span></div><h1>", esc_html(basename(run_dir)), "</h1><p class='subtle'>", esc_html(hero_msg), "</p></div><div>")
         for env in first(envs, min(length(envs), MAX_ENV_BADGES))
             print(io, "<span class='pill'>env: <strong>", esc_html(env), "</strong></span>")
         end
@@ -764,7 +834,7 @@ function build_run_report(run_dir, root)
         end
         print(io, "</tbody></table></div></article></div></section>")
         print(io, "<section class='section'><h2>Global Plots</h2><div class='grid-2'>")
-        isempty(globals) ? print(io, "<article class='note-card muted'>No global plots found for this run.</article>") : foreach(c -> print(io, global_card(c, run_dir)), globals)
+        isempty(globals) ? print(io, "<article class='note-card muted'>No global plots found for this run.</article>") : foreach(c -> print(io, global_card(c, run_dir; embed_images=embed_images, uri_cache=uri_cache)), globals)
         print(io, "</div></section>")
         print(io, "<section class='section'><h2>Case Gallery</h2><div class='filters'><div class='filter-grid'><label>Search<input id='gallery-search' type='search' placeholder='case label, file name, metadata'></label><label>Plot type<select id='gallery-plot-type'><option value='all'>show all</option>")
         for v in plot_types
@@ -784,11 +854,11 @@ function build_run_report(run_dir, root)
             print(io, "<option value='", esc_html(v), "'>", esc_html(v), "</option>")
         end
         print(io, "</select></label></div><p class='subtle tiny'>Visible cards: <span id='gallery-count'>0</span></p></div><div class='gallery'>")
-        isempty(gallery) ? print(io, "<article class='note-card muted'>No case-level plots found.</article>") : foreach(c -> print(io, plot_card(c, run_dir)), gallery)
+        isempty(gallery) ? print(io, "<article class='note-card muted'>No case-level plots found.</article>") : foreach(c -> print(io, plot_card(c, run_dir; embed_images=embed_images, uri_cache=uri_cache)), gallery)
         print(io, "</div>")
         if !isempty(unmatched)
             print(io, "<div class='unmatched'><h3>Unmatched Plots</h3><div class='grid-2'>")
-            foreach(c -> print(io, plot_card(c, run_dir)), unmatched)
+            foreach(c -> print(io, plot_card(c, run_dir; embed_images=embed_images, uri_cache=uri_cache)), unmatched)
             print(io, "</div></div>")
         end
         print(io, "</section><section class='section'><h2>Detailed Parameters</h2><div class='table-wrap'><table><thead><tr><th>case_id</th><th>env</th><th>label</th><th>c values</th><th>lambda_min</th><th>kappa</th><th>gamma</th><th>theta* norm</th><th>metadata</th><th>agg CSV</th><th>run CSV</th><th>ratio files</th></tr></thead><tbody>", parameter_table(groups, run_dir), "</tbody></table></div></section><section class='section'><h2>File Inventory</h2><div class='table-wrap'><table><thead><tr><th>case_id</th><th>label</th><th>agg CSV</th><th>run CSV</th><th>ratio</th><th>plots</th></tr></thead><tbody>", inventory_table(groups, run_dir), "</tbody></table></div></section>")
@@ -846,13 +916,14 @@ function render_index(root, summaries, skipped)
 end
 
 function main(args)
-    root = parse_args(args)
+    opts = parse_args(args)
+    root = opts.root
     isdir(root) || error("Root directory not found: $(root)")
     stable, skipped = discover_runs(root)
     summaries = Dict{String,Any}[]
     for run_dir in stable
         println("[report] ", relpath(run_dir, root))
-        push!(summaries, build_run_report(run_dir, root))
+        push!(summaries, build_run_report(run_dir, root; embed_images=opts.embed_images))
     end
     sort!(summaries, by = s -> s["last_modified"] === nothing ? DateTime(1900,1,1) : s["last_modified"], rev=true)
     render_index(root, summaries, skipped)
@@ -864,9 +935,4 @@ include(joinpath(@__DIR__, "td_instance_report_overrides.jl"))
 if abspath(PROGRAM_FILE) == @__FILE__
     main(ARGS)
 end
-
-
-
-
-
 

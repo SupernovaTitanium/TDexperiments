@@ -5,12 +5,27 @@ using Random
 using Printf
 using Base.Threads
 
-# Deterministic per-run seed without relying on session hash
-@inline function stable_seed(alpha::Float64, run_idx::Int)
+mutable struct SplitMix64RNG
+    state::UInt64
+end
+
+@inline function splitmix64_next!(rng::SplitMix64RNG)::UInt64
+    rng.state += 0x9E3779B97F4A7C15
+    z = rng.state
+    z = (z ⊻ (z >> 30)) * 0xBF58476D1CE4E5B9
+    z = (z ⊻ (z >> 27)) * 0x94D049BB133111EB
+    return z ⊻ (z >> 31)
+end
+
+@inline rand_unit(rng::SplitMix64RNG) = Float64(splitmix64_next!(rng) >> 11) * 0x1.0p-53
+@inline rand_unit(rng::AbstractRNG) = rand(rng)
+
+# Deterministic per-run seed without relying on session hash.
+@inline function stable_seed(alpha::Float64, run_idx::Int, salt::UInt64=UInt64(0))
     a = reinterpret(UInt64, alpha)
     b = UInt64(run_idx)
-    z = (a * 0x9E3779B97F4A7C15) ⊻ (b * 0xD2B74407B1CE6E93) ⊻ 0x94D049BB133111EB
-    return Int(mod(z, UInt64(0x7fffffff))) + 1
+    z = (a * 0x9E3779B97F4A7C15) ⊻ (b * 0xD2B74407B1CE6E93) ⊻ salt ⊻ 0x94D049BB133111EB
+    return mod(z, UInt64(0x7fffffff)) + UInt64(1)
 end
 
 ###############################
@@ -59,13 +74,11 @@ function canonical_env_id(name::AbstractString)
         "e8" => "E8",
         "e9" => "E9",
         "e10" => "E10",
-        "e11" => "E11",
-        "e12" => "E12",
     )
     return get(aliases, env, name)
 end
 
-available_environment_ids() = ["toyexample", "E1", "E2", "E3", "E4", "E5", "E6", "E7", "E8", "E9", "E10", "E11", "E12"]
+available_environment_ids() = ["toyexample", "E1", "E2", "E3", "E4", "E5", "E6", "E7", "E8", "E9", "E10"]
 
 function default_environment_params(env_id::AbstractString)
     env = canonical_env_id(env_id)
@@ -76,25 +89,76 @@ function default_environment_params(env_id::AbstractString)
     elseif env == "E2"
         return Dict("gamma" => "0.99", "eps1" => "1e-3", "eps2" => "1e-2", "reward_mode" => "zero", "rho" => "1.0")
     elseif env == "E3"
+        # new E3 <- old E4
         return Dict("gamma" => "0.99", "eps1" => "1e-3", "eps2" => "1e-2", "reward_mode" => "zero", "rho" => "1.0")
     elseif env == "E4"
-        return Dict("gamma" => "0.99", "eps1" => "1e-3", "eps2" => "1e-2", "reward_mode" => "zero", "rho" => "1.0")
+        # new E4 <- old E5
+        return Dict("gamma" => "0.99", "m" => "20", "eps1" => "1e-2", "reward_mode" => "zero", "rho" => "1.0")
     elseif env == "E5"
+        # new E5 <- old E6
         return Dict("gamma" => "0.99", "m" => "20", "eps1" => "1e-2", "reward_mode" => "zero", "rho" => "1.0")
     elseif env == "E6"
-        return Dict("gamma" => "0.99", "m" => "20", "eps1" => "1e-2", "reward_mode" => "zero", "rho" => "1.0")
-    elseif env == "E7"
-        return Dict("gamma" => "0.99", "eps1" => "1e-3", "rho" => "1.0")
-    elseif env == "E8"
+        # new E6 <- old E8
         return Dict("gamma" => "0.99", "m" => "32", "eps1" => "1e-2", "reward_mode" => "zero", "rho" => "1.0")
-    elseif env == "E9"
+    elseif env == "E7"
+        # new E7 <- old E9
         return Dict("gamma" => "0.99", "m" => "64", "eps1" => "1e-2", "alpha_max" => string(pi / 2), "reward_mode" => "zero", "rho" => "1.0")
-    elseif env == "E10"
+    elseif env == "E8"
+        # new E8 <- old E10
         return Dict("gamma" => "0.99", "eps1" => "1e-2", "eps2" => "1e-2", "reward_mode" => "zero", "rho" => "1.0")
-    elseif env == "E11"
+    elseif env == "E9"
+        # new E9 <- old E11
         return Dict("gamma" => "0.99", "m" => "50", "eps2" => "1e-2", "reward_mode" => "zero", "rho" => "1.0")
-    elseif env == "E12"
+    elseif env == "E10"
+        # new E10 <- old E12
         return Dict("gamma" => "0.99", "k" => "10", "eps1" => "1e-3", "eps2" => "1e-2", "reward_mode" => "cluster-opposite", "rho" => "1.0")
+    end
+    error("Unknown environment id: $env_id")
+end
+
+function _relabel_environment(env::FiniteTDEnv, new_id::AbstractString, new_name::AbstractString)
+    return FiniteTDEnv(
+        String(new_id),
+        String(new_name),
+        env.gamma,
+        env.n_states,
+        env.d,
+        env.P,
+        env.D,
+        env.Phi,
+        env.theta_star,
+        env.V_star,
+        env.r,
+        env.start_state,
+        env.metadata,
+    )
+end
+
+function build_environment(env_id::AbstractString; params::Dict{String,String}=Dict{String,String}())
+    env = canonical_env_id(env_id)
+    merged = _merge_params(default_environment_params(env), params)
+    if env == "toyexample"
+        return _build_toyexample(merged)
+    elseif env == "E1"
+        return _build_e1(merged)
+    elseif env == "E2"
+        return _build_e2(merged)
+    elseif env == "E3"
+        return _relabel_environment(_build_e4(merged), "E3", "E3 metastable trap")
+    elseif env == "E4"
+        return _relabel_environment(_build_e5(merged), "E4", "E4 cycle transport")
+    elseif env == "E5"
+        return _relabel_environment(_build_e6(merged), "E5", "E5 conveyor with reset")
+    elseif env == "E6"
+        return _relabel_environment(_build_e8(merged), "E6", "E6 rotating-arc ring")
+    elseif env == "E7"
+        return _relabel_environment(_build_e9(merged), "E7", "E7 open excursion arc")
+    elseif env == "E8"
+        return _relabel_environment(_build_e10(merged), "E8", "E8 bow-tie cycle")
+    elseif env == "E9"
+        return _relabel_environment(_build_e11(merged), "E9", "E9 diffusive corridor")
+    elseif env == "E10"
+        return _relabel_environment(_build_e12(merged), "E10", "E10 two-cluster forcing")
     end
     error("Unknown environment id: $env_id")
 end
@@ -239,8 +303,8 @@ function _build_toyexample(params::Dict{String,String})
     n_states = 50
     d = 5
 
-    reward_rng = MersenneTwister(seed)
-    feature_rng = MersenneTwister(seed)
+    reward_rng = SplitMix64RNG(UInt64(seed))
+    feature_rng = SplitMix64RNG(UInt64(seed))
 
     P = zeros(Float64, n_states, n_states)
     @inbounds for i in 1:n_states
@@ -249,8 +313,20 @@ function _build_toyexample(params::Dict{String,String})
         P[i, ((i - 2 + n_states) % n_states) + 1] = 0.3
     end
 
-    r = rand(reward_rng, n_states, n_states)
-    Phi = rand(feature_rng, n_states, d) * 10.0
+    # Fill in row-major visitation order so Julia/C++ consume identical random streams.
+    r = zeros(Float64, n_states, n_states)
+    @inbounds for i in 1:n_states
+        for j in 1:n_states
+            r[i, j] = rand_unit(reward_rng)
+        end
+    end
+
+    Phi = zeros(Float64, n_states, d)
+    @inbounds for i in 1:n_states
+        for j in 1:d
+            Phi[i, j] = 10.0 * rand_unit(feature_rng)
+        end
+    end
     if scale_factor <= 1.0
         @views Phi[:, 1] .*= scale_factor
     else
@@ -372,10 +448,23 @@ function _build_e7(params::Dict{String,String})
     gamma = _float_param(params, "gamma", 0.99)
     eps1 = _float_param(params, "eps1", 1e-3)
     rho = _float_param(params, "rho", 1.0)
+    reward_mode = _string_param(params, "reward_mode", "antisymmetric")
     P = _sticky_transition_matrix(eps1)
     Phi = reshape(fill(1.0 / sqrt(2.0), 2), 2, 1)
-    rewards = [rho, -rho]
-    metadata = _format_metadata(params, ["gamma", "eps1", "rho"])
+
+    rewards = if reward_mode == "antisymmetric"
+        [rho, -rho]
+    elseif reward_mode == "state1-only"
+        [rho, 0.0]
+    elseif reward_mode == "state2-only"
+        [0.0, rho]
+    elseif reward_mode == "same-sign"
+        [rho, rho]
+    else
+        error("Unsupported E7 reward_mode: $reward_mode")
+    end
+
+    metadata = _format_metadata(params, ["gamma", "eps1", "rho", "reward_mode"])
     return _finalize_environment("E7", "E7 persistent-sign forcing", gamma, P, Phi, _state_reward_matrix(rewards); start_state=1, metadata=metadata)
 end
 
@@ -517,44 +606,11 @@ function _build_e12(params::Dict{String,String})
     return _finalize_environment("E12", "E12 two-cluster forcing", gamma, P, Phi, _state_reward_matrix(rewards); start_state=1, metadata=metadata)
 end
 
-function build_environment(env_id::AbstractString; params::Dict{String,String}=Dict{String,String}())
-    env = canonical_env_id(env_id)
-    merged = _merge_params(default_environment_params(env), params)
-    if env == "toyexample"
-        return _build_toyexample(merged)
-    elseif env == "E1"
-        return _build_e1(merged)
-    elseif env == "E2"
-        return _build_e2(merged)
-    elseif env == "E3"
-        return _build_e3(merged)
-    elseif env == "E4"
-        return _build_e4(merged)
-    elseif env == "E5"
-        return _build_e5(merged)
-    elseif env == "E6"
-        return _build_e6(merged)
-    elseif env == "E7"
-        return _build_e7(merged)
-    elseif env == "E8"
-        return _build_e8(merged)
-    elseif env == "E9"
-        return _build_e9(merged)
-    elseif env == "E10"
-        return _build_e10(merged)
-    elseif env == "E11"
-        return _build_e11(merged)
-    elseif env == "E12"
-        return _build_e12(merged)
-    end
-    error("Unknown environment id: $env_id")
-end
-
 @inline reset!(env::FiniteTDEnv)::Int = env.start_state
 @inline phi(env::FiniteTDEnv, s::Int) = @view env.Phi[s, :]
 
-@inline function step(env::FiniteTDEnv, s::Int, rng::AbstractRNG)
-    u = rand(rng)
+@inline function step(env::FiniteTDEnv, s::Int, rng)
+    u = rand_unit(rng)
     csum = 0.0
     s_next = env.n_states
     @inbounds for j in 1:env.n_states
@@ -635,7 +691,7 @@ function run_single_simulation(alpha::Float64, run_idx::Int, n_steps::Int,
                                G::Matrix{Float64}, b::Vector{Float64}, c::Float64,
                                G_A::Matrix{Float64}, b_A::Vector{Float64}, c_A::Float64;
                                schedule::Symbol=:const, c_param::Float64=NaN)
-    rng = MersenneTwister(stable_seed(alpha, run_idx))
+    rng = SplitMix64RNG(stable_seed(alpha, run_idx))
 
     d = env.d
     gamma = env.gamma
@@ -777,13 +833,17 @@ function aggregate_results(results::Vector{RunResult}, checkpoints::AbstractVect
         ct = counts[tid]
         @inbounds @simd for idx in 1:n_checkpoints
             v = vb[idx]
-            sv[idx] += v
-            sv2[idx] += v * v
-            sva[idx] += vba[idx]
-            sva2[idx] += vba[idx] * vba[idx]
-            st[idx] += th[idx]
-            st2[idx] += th[idx] * th[idx]
-            ct[idx] += 1
+            va = vba[idx]
+            tnv = th[idx]
+            if isfinite(v) && isfinite(va) && isfinite(tnv)
+                sv[idx] += v
+                sv2[idx] += v * v
+                sva[idx] += va
+                sva2[idx] += va * va
+                st[idx] += tnv
+                st2[idx] += tnv * tnv
+                ct[idx] += 1
+            end
         end
     end
 

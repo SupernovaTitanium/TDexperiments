@@ -52,7 +52,7 @@ function builtin_instance_catalog()
         transition_summary="原始 toyexample 使用固定 finite-state 結構，重點不是換環境家族，而是沿著 scale / eigen / kappa 的幾何掃描看 threshold 位置怎麼改變。",
         feature_summary="特徵方向與特徵尺度是主要操控項；viewer 會把 scale、eigen、kappa 當成此例子的主要 case knobs。",
         reward_summary="沿用原本 toyexample 的 reward / fixed-point 設定，主要目的是對照不同幾何與 schedule 下的收斂或發散邊界。",
-        why_promising="它提供最完整、最早的 baseline sweep，所以適合拿來對照新加入的 E1–E12 機制型環境。",
+        why_promising="它提供最完整、最早的 baseline sweep，所以適合拿來對照新加入的 E1–E10 機制型環境。",
         what_it_tests="主要診斷原始 threshold 問題對 scale、eigen、kappa 和 c 的敏感度，而不是針對單一新機制做 isolated diagnosis。",
         expected_behavior="應該呈現相對平滑的 threshold 變化，適合作為後續多種 TD instance 的參考基線。",
         primary_knobs=["scale", "eigen", "kappa"],
@@ -254,13 +254,31 @@ function build_instance_catalog(repo_root)
     return catalog
 end
 
+const RENAMED_INSTANCE_SOURCE = Dict(
+    "E3" => "E4",
+    "E4" => "E5",
+    "E5" => "E6",
+    "E6" => "E8",
+    "E7" => "E9",
+    "E8" => "E10",
+    "E9" => "E11",
+    "E10" => "E12",
+)
+
 function instance_for_env(catalog, env)
-    if haskey(catalog, env)
-        return catalog[env]
+    env_s = String(env)
+    src = get(RENAMED_INSTANCE_SOURCE, env_s, env_s)
+    if haskey(catalog, src)
+        inst = copy(catalog[src])
+        inst["env_id"] = env_s
+        if src != env_s
+            inst["source"] = string(inst["source"], " (renumbered from ", src, ")")
+        end
+        return inst
     end
     inst = copy(catalog["unknown"])
-    inst["env_id"] = env
-    inst["mechanism_tag"] = env
+    inst["env_id"] = env_s
+    inst["mechanism_tag"] = env_s
     return inst
 end
 
@@ -511,11 +529,24 @@ function attach_plots(groups, assets, format)
     return globals, gallery, unmatched
 end
 
-function plot_card(card, run_dir)
-    img = !isempty(card["src"]) ? "<img loading='lazy' src='$(url_path(relpath(card["src"], run_dir)))' alt='$(esc_html(card["base"]))'>" : "<div class='image-warning'>PNG unavailable for inline display.</div>"
+function plot_card(card, run_dir; embed_images::Bool=false, uri_cache::Dict{String,String}=Dict{String,String}())
+    img = if !isempty(card["src"])
+        src = embed_images ? data_uri(card["src"], uri_cache) : url_path(relpath(card["src"], run_dir))
+        "<img loading='lazy' src='$(esc_html(src))' alt='$(esc_html(card["base"]))'>"
+    else
+        "<div class='image-warning'>PNG unavailable for inline display.</div>"
+    end
     links = String[]
-    !isempty(card["png"]) && push!(links, "<a href='$(url_path(relpath(card["png"], run_dir)))'>PNG</a>")
-    !isempty(card["eps"]) && push!(links, "<a href='$(url_path(relpath(card["eps"], run_dir)))'>EPS</a>")
+    if !isempty(card["png"])
+        href = embed_images ? data_uri(card["png"], uri_cache) : url_path(relpath(card["png"], run_dir))
+        dl = embed_images ? " download='$(esc_html(basename(card["png"])))'" : ""
+        push!(links, "<a href='$(esc_html(href))'$(dl)>PNG</a>")
+    end
+    if !isempty(card["eps"])
+        href = embed_images ? data_uri(card["eps"], uri_cache) : url_path(relpath(card["eps"], run_dir))
+        dl = embed_images ? " download='$(esc_html(basename(card["eps"])))'" : ""
+        push!(links, "<a href='$(esc_html(href))'$(dl)>EPS</a>")
+    end
     cset = isempty(card["c"]) ? "" : join(fmt_short.(sort(unique(card["c"]))), "|")
     info = ["<span class='badge'><code>$(esc_html(card["label"]))</code></span>"]
     if card["case_id"] != "global"
@@ -558,27 +589,35 @@ plot_status(plot_count, png_complete) = plot_count == 0 ? "none" : png_complete 
 plot_status_rank(status) = status == "complete" ? 2 : status == "partial" ? 1 : 0
 plot_status_label(status, png_count, plot_count) = status == "none" ? "no plots" : status == "complete" ? "PNG complete" : string("PNG ", png_count, "/", plot_count)
 
-function run_card_html(summary, root)
-    report_rel = url_path(relpath(summary["report_path"], root))
+function run_card_html(summary, root; embed_reports_in_index::Bool=false, report_uri_cache::Dict{String,String}=Dict{String,String}())
+    report_rel = if embed_reports_in_index
+        data_uri(summary["report_path"], report_uri_cache; mime="text/html;charset=utf-8")
+    else
+        url_path(relpath(summary["report_path"], root))
+    end
     search = lowercase(join([summary["run_label"], summary["rel_dir"], summary["primary_env"], summary["instance_title"], summary["instance_one_liner"], summary["mechanism_tag"]], " "))
     date_val = summary["last_modified"] === nothing ? 0 : Dates.value(summary["last_modified"])
     status = summary["png_status"]
-    return "<article class='run-card' data-run-card='1' data-search='" * esc_html(search) * "' data-env='" * esc_html(summary["primary_env"]) * "' data-manifest='" * (summary["manifest"] ? "manifest" : "legacy") * "' data-png-status='" * esc_html(status) * "' data-date='" * string(date_val) * "' data-name='" * esc_html(lowercase(summary["run_label"])) * "' data-png-rank='" * string(plot_status_rank(status)) * "'><div class='path'><code>" * esc_html(summary["rel_dir"]) * "</code></div><h3>" * esc_html(summary["run_label"]) * "</h3><p class='muted tiny'>" * esc_html(summary["instance_one_liner"]) * "</p><div class='meta'><span class='badge'>" * esc_html(plot_status_label(status, summary["png_count"], summary["plot_count"])) * "</span>" * (summary["manifest"] ? "<span class='badge'>manifest</span>" : "<span class='badge'>legacy</span>") * (summary["log"] ? "<span class='badge'>log</span>" : "<span class='badge'>no log</span>") * "</div><div class='run-metrics'><div class='cell'><span class='k'>cases</span><span class='v'>" * string(summary["case_count"]) * "</span></div><div class='cell'><span class='k'>c count</span><span class='v'>" * string(summary["c_count"]) * "</span></div><div class='cell'><span class='k'>n_runs</span><span class='v'>" * (summary["n_runs"] === nothing ? "not recorded" : string(summary["n_runs"])) * "</span></div><div class='cell'><span class='k'>n_steps</span><span class='v'>" * (summary["n_steps"] === nothing ? "not recorded" : string(summary["n_steps"])) * "</span></div><div class='cell'><span class='k'>threads</span><span class='v'>" * (summary["threads"] === nothing ? "not recorded" : string(summary["threads"])) * "</span></div><div class='cell'><span class='k'>plots</span><span class='v'>" * string(summary["plot_count"]) * "</span></div></div><p class='muted tiny'>modified: " * esc_html(fmt_dt(summary["last_modified"])) * "</p><p><a href='" * report_rel * "'>Open report</a></p></article>"
+    return "<article class='run-card' data-run-card='1' data-search='" * esc_html(search) * "' data-env='" * esc_html(summary["primary_env"]) * "' data-manifest='" * (summary["manifest"] ? "manifest" : "legacy") * "' data-png-status='" * esc_html(status) * "' data-date='" * string(date_val) * "' data-name='" * esc_html(lowercase(summary["run_label"])) * "' data-png-rank='" * string(plot_status_rank(status)) * "'><div class='path'><code>" * esc_html(summary["rel_dir"]) * "</code></div><h3>" * esc_html(summary["run_label"]) * "</h3><p class='muted tiny'>" * esc_html(summary["instance_one_liner"]) * "</p><div class='meta'><span class='badge'>" * esc_html(plot_status_label(status, summary["png_count"], summary["plot_count"])) * "</span>" * (summary["manifest"] ? "<span class='badge'>manifest</span>" : "<span class='badge'>legacy</span>") * (summary["log"] ? "<span class='badge'>log</span>" : "<span class='badge'>no log</span>") * "</div><div class='run-metrics'><div class='cell'><span class='k'>cases</span><span class='v'>" * string(summary["case_count"]) * "</span></div><div class='cell'><span class='k'>c count</span><span class='v'>" * string(summary["c_count"]) * "</span></div><div class='cell'><span class='k'>n_runs</span><span class='v'>" * (summary["n_runs"] === nothing ? "not recorded" : string(summary["n_runs"])) * "</span></div><div class='cell'><span class='k'>n_steps</span><span class='v'>" * (summary["n_steps"] === nothing ? "not recorded" : string(summary["n_steps"])) * "</span></div><div class='cell'><span class='k'>threads</span><span class='v'>" * (summary["threads"] === nothing ? "not recorded" : string(summary["threads"])) * "</span></div><div class='cell'><span class='k'>plots</span><span class='v'>" * string(summary["plot_count"]) * "</span></div></div><p class='muted tiny'>modified: " * esc_html(fmt_dt(summary["last_modified"])) * "</p><p><a href='" * esc_html(report_rel) * "'>Open report</a></p></article>"
 end
 
-function env_card_html(env_id, runs, root)
+function env_card_html(env_id, runs, root; embed_reports_in_index::Bool=false, report_uri_cache::Dict{String,String}=Dict{String,String}())
     latest = first(runs)
-    latest_link = url_path(relpath(latest["report_path"], root))
+    latest_link = if embed_reports_in_index
+        data_uri(latest["report_path"], report_uri_cache; mime="text/html;charset=utf-8")
+    else
+        url_path(relpath(latest["report_path"], root))
+    end
     env_search = lowercase(join([latest["instance_title"], latest["instance_one_liner"], latest["mechanism_tag"], env_id], " "))
     html = IOBuffer()
-    print(html, "<article class='env-card' data-env-card='1' data-group='", esc_html(latest["mechanism_group_key"]), "' data-env='", esc_html(env_id), "' data-search='", esc_html(env_search), "' data-env-name='", esc_html(lowercase(latest["instance_title"])), "' data-latest-date='", latest["last_modified"] === nothing ? 0 : Dates.value(latest["last_modified"]), "' data-png-rank='", plot_status_rank(latest["png_status"]), "'><div class='env-top'><div><h2>", esc_html(latest["instance_title"]), "</h2><p class='env-brief'>", esc_html(latest["instance_one_liner"]), "</p></div><p><a href='", latest_link, "'>Open latest report</a></p></div><div class='meta'><span class='badge'>", esc_html(latest["mechanism_tag"]), "</span><span class='badge'>runs: ", length(runs), "</span><span class='badge'>latest plots: ", latest["plot_count"], "</span><span class='badge'>latest updated: ", esc_html(fmt_dt(latest["last_modified"])), "</span></div><div class='env-summary-grid'><div class='cell'><span class='k'>Latest run</span><span class='v'>", esc_html(latest["run_label"]), "</span></div><div class='cell'><span class='k'>Observed runs</span><span class='v'>", length(runs), "</span></div><div class='cell'><span class='k'>Latest PNG status</span><span class='v'>", esc_html(plot_status_label(latest["png_status"], latest["png_count"], latest["plot_count"])), "</span></div><div class='cell'><span class='k'>Latest c grid</span><span class='v'>", latest["c_count"], "</span></div></div><div class='env-latest'><h3>Latest divergence by c</h3>", compact_divergence_table(latest["divergence_rows"]), "</div><div class='run-grid run-list'>")
+    print(html, "<article class='env-card' data-env-card='1' data-group='", esc_html(latest["mechanism_group_key"]), "' data-env='", esc_html(env_id), "' data-search='", esc_html(env_search), "' data-env-name='", esc_html(lowercase(latest["instance_title"])), "' data-latest-date='", latest["last_modified"] === nothing ? 0 : Dates.value(latest["last_modified"]), "' data-png-rank='", plot_status_rank(latest["png_status"]), "'><div class='env-top'><div><h2>", esc_html(latest["instance_title"]), "</h2><p class='env-brief'>", esc_html(latest["instance_one_liner"]), "</p></div><p><a href='", esc_html(latest_link), "'>Open latest report</a></p></div><div class='meta'><span class='badge'>", esc_html(latest["mechanism_tag"]), "</span><span class='badge'>runs: ", length(runs), "</span><span class='badge'>latest plots: ", latest["plot_count"], "</span><span class='badge'>latest updated: ", esc_html(fmt_dt(latest["last_modified"])), "</span></div><div class='env-summary-grid'><div class='cell'><span class='k'>Latest run</span><span class='v'>", esc_html(latest["run_label"]), "</span></div><div class='cell'><span class='k'>Observed runs</span><span class='v'>", length(runs), "</span></div><div class='cell'><span class='k'>Latest PNG status</span><span class='v'>", esc_html(plot_status_label(latest["png_status"], latest["png_count"], latest["plot_count"])), "</span></div><div class='cell'><span class='k'>Latest c grid</span><span class='v'>", latest["c_count"], "</span></div></div><div class='env-latest'><h3>Latest divergence by c</h3>", compact_divergence_table(latest["divergence_rows"]), "</div><div class='run-grid run-list'>")
     for run in runs
-        print(html, run_card_html(run, root))
+        print(html, run_card_html(run, root; embed_reports_in_index=embed_reports_in_index, report_uri_cache=report_uri_cache))
     end
     print(html, "</div></article>")
     return String(take!(html))
 end
-function build_run_report(run_dir, root, catalog)
+function build_run_report(run_dir, root, catalog; embed_images::Bool=false)
     format = isfile(joinpath(run_dir, "manifest.tsv")) ? :manifest : :legacy
     warn = String[]
     png = ensure_pngs(run_dir)
@@ -635,6 +674,7 @@ function build_run_report(run_dir, root, catalog)
         ("log", guess_log(run_dir) === nothing ? "absent" : basename(guess_log(run_dir)), guess_log(run_dir) === nothing ? "filesystem" : "log discovery"),
     ]
     report_path = joinpath(run_dir, "report.html")
+    uri_cache = Dict{String,String}()
     case_ids = sort(unique([String(c["case_id"]) for c in gallery if c["case_id"] != "global"]))
     plot_types = sort(unique([String(c["type"]) for c in gallery]))
     objectives = sort(unique([String(c["obj"]) for c in gallery]))
@@ -672,7 +712,7 @@ function build_run_report(run_dir, root, catalog)
         print(io, "<section class='section'><h2>How to Read This Run</h2><article class='note-card'>", render_markdownish(default_reading_guide(run_instance)), "</article></section>")
         print(io, "<section class='section'><h2>Case Interpretation Table</h2><div class='table-wrap'><table><thead><tr><th>case_id</th><th>interpretation</th><th>c values</th><th>metadata</th><th>spectral stats</th></tr></thead><tbody>", case_interpretation_rows_html(groups), "</tbody></table></div></section>")
         print(io, "<section class='section'><h2>Global Plots</h2><div class='grid-2'>")
-        isempty(globals) ? print(io, "<article class='note-card muted'>No global plots found for this run.</article>") : foreach(c -> print(io, global_card(c, run_dir)), globals)
+        isempty(globals) ? print(io, "<article class='note-card muted'>No global plots found for this run.</article>") : foreach(c -> print(io, global_card(c, run_dir; embed_images=embed_images, uri_cache=uri_cache)), globals)
         print(io, "</div></section>")
         print(io, "<section class='section'><h2>Case Gallery</h2><div class='filters'><div class='filter-grid'><label>Search<input id='gallery-search' type='search' placeholder='case label, file name, metadata'></label><label>Plot type<select id='gallery-plot-type'><option value='all'>show all</option>")
         for v in plot_types
@@ -692,11 +732,11 @@ function build_run_report(run_dir, root, catalog)
             print(io, "<option value='", esc_html(v), "'>", esc_html(v), "</option>")
         end
         print(io, "</select></label></div><p class='subtle tiny'>Visible cards: <span id='gallery-count'>0</span></p></div><div class='gallery'>")
-        isempty(gallery) ? print(io, "<article class='note-card muted'>No case-level plots found.</article>") : foreach(c -> print(io, plot_card(c, run_dir)), gallery)
+        isempty(gallery) ? print(io, "<article class='note-card muted'>No case-level plots found.</article>") : foreach(c -> print(io, plot_card(c, run_dir; embed_images=embed_images, uri_cache=uri_cache)), gallery)
         print(io, "</div>")
         if !isempty(unmatched)
             print(io, "<div class='unmatched'><h3>Unmatched Plots</h3><div class='grid-2'>")
-            foreach(c -> print(io, plot_card(c, run_dir)), unmatched)
+            foreach(c -> print(io, plot_card(c, run_dir; embed_images=embed_images, uri_cache=uri_cache)), unmatched)
             print(io, "</div></div>")
         end
         print(io, "</section><section class='section'><h2>Detailed Parameters</h2><div class='table-wrap'><table><thead><tr><th>case_id</th><th>env</th><th>label</th><th>c values</th><th>lambda_min</th><th>kappa</th><th>gamma</th><th>theta* norm</th><th>metadata</th><th>agg CSV</th><th>run CSV</th><th>ratio files</th></tr></thead><tbody>", parameter_table(groups, run_dir), "</tbody></table></div></section><section class='section'><h2>File Inventory</h2><div class='table-wrap'><table><thead><tr><th>case_id</th><th>label</th><th>agg CSV</th><th>run CSV</th><th>ratio</th><th>plots</th></tr></thead><tbody>", inventory_table(groups, run_dir), "</tbody></table></div></section>")
@@ -729,7 +769,7 @@ function build_run_report(run_dir, root, catalog)
         "divergence_rows" => div_rows,
     )
 end
-function render_index(root, summaries, skipped)
+function render_index(root, summaries, skipped; embed_reports_in_index::Bool=false)
     env_map = Dict{String,Vector{Dict{String,Any}}}()
     for summary in summaries
         push!(get!(env_map, String(summary["primary_env"]), Dict{String,Any}[]), summary)
@@ -738,6 +778,7 @@ function render_index(root, summaries, skipped)
         sort!(runs, by = s -> s["last_modified"] === nothing ? DateTime(1900,1,1) : s["last_modified"], rev=true)
     end
     envs = sort(collect(keys(env_map)))
+    report_uri_cache = Dict{String,String}()
     open(joinpath(root, "index.html"), "w") do io
         print(io, "<!doctype html><html lang='zh-Hant'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width, initial-scale=1'><title>TD Runs Viewer</title>", INDEX_STYLE, INDEX_STYLE_EXTRA, "</head><body><div class='page'><section class='hero'><h1>TD Runs Viewer</h1><p>Instance-aware static HTML index for local experiment browsing. Runs are grouped by TD mechanism so you can compare different instance families before drilling down into a specific report.</p><div class='hero-grid'><div class='stat'><span class='label'>Stable runs indexed</span><span class='value'>", length(summaries), "</span></div><div class='stat'><span class='label'>Distinct env cards</span><span class='value'>", length(envs), "</span></div><div class='stat'><span class='label'>PNG complete runs</span><span class='value'>", count(s -> s["png_status"] == "complete", summaries), "</span></div><div class='stat'><span class='label'>Skipped active runs</span><span class='value'>", length(skipped), "</span></div></div></section><section class='controls'><div class='control-grid'><label>Search<input id='run-search' type='search' placeholder='env, mechanism, run label'></label><label>Mechanism group<select id='run-group'><option value='all'>show all</option>")
         for key in GROUP_ORDER
@@ -753,7 +794,7 @@ function render_index(root, summaries, skipped)
             isempty(env_ids) && continue
             print(io, "<section class='section group-section' data-group-section='", esc_html(key), "'><div class='group-header'><h2>", esc_html(GROUP_INFO[key]["label"]), "</h2><p>", esc_html(GROUP_INFO[key]["blurb"]), "</p></div><div class='env-stack'>")
             for env in env_ids
-                print(io, env_card_html(env, env_map[env], root))
+                print(io, env_card_html(env, env_map[env], root; embed_reports_in_index=embed_reports_in_index, report_uri_cache=report_uri_cache))
             end
             print(io, "</div></section>")
         end
@@ -769,17 +810,18 @@ function render_index(root, summaries, skipped)
 end
 
 function main(args)
-    root = parse_args(args)
+    opts = parse_args(args)
+    root = opts.root
     isdir(root) || error("Root directory not found: $(root)")
     stable, skipped = discover_runs(root)
     catalog = build_instance_catalog(dirname(root))
     summaries = Dict{String,Any}[]
     for run_dir in stable
         println("[report] ", relpath(run_dir, root))
-        push!(summaries, build_run_report(run_dir, root, catalog))
+        push!(summaries, build_run_report(run_dir, root, catalog; embed_images=opts.embed_images))
     end
     sort!(summaries, by = s -> s["last_modified"] === nothing ? DateTime(1900,1,1) : s["last_modified"], rev=true)
-    render_index(root, summaries, skipped)
+    render_index(root, summaries, skipped; embed_reports_in_index=opts.embed_reports_in_index)
     println("[done] index => ", joinpath(root, "index.html"))
 end
 
@@ -800,4 +842,3 @@ function safe_readdir(path)
         return readdir(longpath(path))
     end
 end
-
