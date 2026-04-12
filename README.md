@@ -1,51 +1,129 @@
-# TD Threshold — C++ Engine + Python Plots
+# TD Threshold Experiments
 
-This repository now includes a high-performance C++ implementation of the TD experiments under `cpp/`, with Python plotting scripts under `scripts/`.
+Finite-state TD(0) experiment repository with:
 
-Legacy Julia scripts are still present for reference and historical comparison, but the recommended execution path is now:
+- a C++ experiment engine in `cpp/`
+- Python plotting/report generation in `scripts/`
+- legacy Julia implementations kept for reference and historical comparison
 
-1. Run sweep/experiments with `cpp/tdx`
-2. Plot + report with the unified Python v2 pipeline
-   - `scripts/plot_suite_v2.py`
-   - `scripts/generate_embedded_report_v2.py`
+The recommended workflow is now:
 
-## Quick Start (C++)
+1. run experiments with `./cpp/tdx`
+2. generate plots with `scripts/plot_suite_v2.py`
+3. generate a self-contained HTML report with `scripts/generate_embedded_report_v2.py`
 
-Build:
+## Current Status
+
+`main` now points to the exactness-preserving accelerated C++ engine.
+
+This version keeps outputs byte-identical to the earlier stable baseline on the checked benchmark suites while running materially faster. See:
+
+- `analysis/final_exact_revalidation_20260412.md`
+- `analysis/perf_exact_vs_baseline_1e6_c9_20260412.md`
+- `analysis/large_benchmark_all11_20260411.md`
+
+## Repository Layout
+
+- `cpp/tdx.cpp`: main TD experiment engine
+- `cpp/tdmix_kstep.cpp`: k-step Dobrushin contraction / mixing-time utility
+- `cpp/Makefile`: C++ build entrypoint
+- `scripts/plot_suite_v2.py`: main plot generator for C++ outputs
+- `scripts/generate_embedded_report_v2.py`: self-contained HTML report generator
+- `scripts/run_full_*.sh`: checked-in experiment launchers
+- `analysis/`: debugging, benchmarking, and exactness reports
+- `verification/`: instance summaries, comparison tables, and verification artifacts
+- `configs/`: example config-driven sweeps
+- `README.md`: human-oriented repo guide
+- `AGENTS.md`: repo-local instructions for Codex and future maintenance
+
+## Supported Experiment Structure
+
+The current C++ engine supports:
+
+- environments: `toyexample`, `E1`, `E2`, ..., `E10`
+- default 4-case parameter sweep per environment family
+  - `toyexample`, `E4`, `E5`, `E6`, `E7`: `feature_omega_beta = {1e-3, 1e-2, 1e-1, 1.0}`
+  - `E1`, `E2`, `E3`, `E8`, `E9`, `E10`: `eps2 = {1e-4, 1e-2, 1e-1, 1.0}`
+  - these defaults are the current source of the four benchmarked omega levels
+- schedules:
+  - `theory`
+  - `theory_log2`
+  - `inv_t`
+  - `inv_sqrt_t`
+  - `inv_t_2_3`
+  - `inv_omega_t`
+  - `constant_omega`
+  - `constant`
+- projections:
+  - `none`
+  - `oracle`
+  - `upper`
+
+Projection radii:
+
+- `oracle`: `R = ||theta*||_2`
+- `upper`: `R = 2*r_max / (sqrt(omega) * (1-gamma)^(3/2))`
+
+## Build
+
+Build the C++ binaries:
 
 ```bash
 make -C cpp
 ```
 
-Run a sweep (example):
+Useful binaries:
+
+- `cpp/tdx`: TD experiment engine
+- `cpp/tdmix_kstep`: k-step Dobrushin mixing estimator
+
+Show CLI help:
+
+```bash
+./cpp/tdx --help
+./cpp/tdmix_kstep --help
+```
+
+## Quick Start
+
+Run one sweep directly:
 
 ```bash
 ./cpp/tdx sweep \
   --env E4 \
-  --set eps1=1e-3 \
-  --set eps2=1e-2 \
+  --set reward_mode=single-site \
+  --set rho=1.0 \
   --base_values 1e-3,1e-2,1e-1,1 \
   --schedules theory,theory_log2,inv_t,inv_sqrt_t,inv_t_2_3,inv_omega_t,constant_omega,constant \
   --projections none,oracle,upper \
   --n_steps 1000000 \
-  --n_runs 32 \
+  --n_runs 40 \
+  --threads 40 \
   --outdir td_cxx_logs
 ```
 
-Or run from a checked-in config:
+Run from a config file:
 
 ```bash
 ./cpp/tdx sweep --config configs/study_e4.cfg
 ```
 
-Generate plots:
+## Plotting and Report Generation
+
+Use the dedicated plotting environment in `./.venv_plot`.
+
+In this repository, the safe plotting command is:
 
 ```bash
 UV_CACHE_DIR=/tmp/uv-cache \
 MPLCONFIGDIR=/home/leew0a/codex/TDfullexperiments/.mplconfig \
 uv run --python ./.venv_plot/bin/python python scripts/plot_suite_v2.py \
   --run-dir td_cxx_logs/<env>_<timestamp>
+```
 
+Generate the embedded HTML report:
+
+```bash
 UV_CACHE_DIR=/tmp/uv-cache \
 MPLCONFIGDIR=/home/leew0a/codex/TDfullexperiments/.mplconfig \
 uv run --python ./.venv_plot/bin/python python scripts/generate_embedded_report_v2.py \
@@ -53,313 +131,91 @@ uv run --python ./.venv_plot/bin/python python scripts/generate_embedded_report_
 ```
 
 Notes:
-- The plotting environment is `./.venv_plot` (managed as the project plotting Python env).
-- In sandboxed runs, set `UV_CACHE_DIR` to a writable location (for example `/tmp/uv-cache`).
-- `cpp/tdx --plot_python` now prefers `./.venv_plot/bin/python` automatically.
-- You can override the plotting interpreter via `TDPLOT_PYTHON=/path/to/python`.
 
-`plot_suite_v2.py` is the single plotting entrypoint for C++ outputs. It reads `manifest.tsv` and supports variable numbers of:
+- prefer `./.venv_plot/bin/python` for plotting work
+- in sandboxed runs, use writable `UV_CACHE_DIR`, usually `/tmp/uv-cache`
+- `./cpp/tdx --plot_python` auto-detects `./.venv_plot/bin/python` before falling back to `python3`
+- `plot_suite_v2.py` supports variable numbers of cases, omega levels, methods, and `c` values
+- `generate_embedded_report_v2.py` picks the latest run directory per environment when given a root with multiple runs
 
-- instances per env (`case_id` count)
-- omega levels (no hard-coded 4-omega assumption)
-- methods (`schedule x projection`)
-- `c` values
+## Checked-In Experiment Launchers
 
-v2 plot families on C++ output:
+Representative launchers:
 
-- `bestcurves_by_c` with best `c` per method (metric `D` and `D+A`)
-- per-method final grids (rows by omega, columns ratio/divergence/`D`/`D+A`)
-- per-method learning-curve-by-`c` grids (`D`, `D+A`)
-- per-method omega-vs-final-error scatter (`D`, `D+A`)
-- per-omega figures that overlay all methods at each method's best `c` (`D`, `D+A`)
+- `scripts/run_full_1e6_all_algos_44instances_n36.sh`
+- `scripts/run_full_1e7_theory_all_envs.sh`
+- `scripts/run_full_1e9_all_algos_projected_all_envs.sh`
+- `scripts/monitor_full_run_progress.py`
 
-Python plotting dependencies:
+These scripts are useful references even when you override `N_STEPS`, `N_RUNS`, `THREADS`, `BASE_VALUES`, or output roots via environment variables.
 
-```bash
-python3 -m pip install matplotlib
-```
+## Output Format
 
-Key algorithm support in C++:
+Each `./cpp/tdx sweep` run creates a timestamped run directory containing at least:
 
-- Unprojected TD(0): `theory`, `constant`, `inv_t`, `inv_sqrt_t`, `inv_omega_t`
-- Additional schedules: `theory_log2`, `inv_t_2_3`, `constant_omega`
-- Projected TD(0):
-  - oracle radius: `R = ||theta*||_2`
-  - upper-bound radius: `R = 2*r_max / (sqrt(omega) * (1-gamma)^(3/2))`
+- `manifest.tsv`
+- `runs_case_*.csv`
+- `agg_case_*.csv`
 
-Output schema (`manifest.tsv`) includes:
+`manifest.tsv` is the source of truth for downstream plotting and report generation. It records, among other fields:
 
-- `algorithm`, `schedule`, `projection`, `projection_radius`
+- environment and case identifiers
+- schedule / projection / algorithm metadata
 - `omega`, `kappa`, `tau_proxy`
-- `agg_file`, `run_file` for downstream plotting
-
-## Full Study Requested (1e7 steps, 48 Monte Carlo, toyexample + E1..E10)
-
-Run the exact full sweep used in this project update:
-
-```bash
-make -C cpp
-./scripts/run_full_1e7_theory_all_envs.sh
-```
+- output file paths for aggregate and per-run CSVs
 
-Defaults in `scripts/run_full_1e7_theory_all_envs.sh`:
+## Exactness and Performance Policy
 
-- environments: `toyexample,E1,E2,...,E10`
-- `n_steps=10000000`
-- `n_runs=48`
-- `threads=48`
-- schedule/projection: `theory` + `none`
-- scale grid (`base_values`): `1e-5` to `1e3` with half-decade spacing (17 values)
-- output root: `td_cxx_logs_full_1e7`
+The current repository policy is:
 
-Produced artifacts:
-
-- per-environment run folders: `td_cxx_logs_full_1e7/<env>_<timestamp>/`
-- full log: `td_cxx_logs_full_1e7/full_run_<timestamp>.log`
-- each `manifest.tsv` row has one `(env, c)` combination and points to:
-  - aggregate curve file (`agg_file`)
-  - per-MC run file (`run_file`, 48 rows)
-
-## Full 1e9 Study (All Stepsizes + Projected TD, 48 Monte Carlo, toyexample + E1..E10)
-
-Run the complete C++ sweep:
-
-```bash
-make -C cpp
-./scripts/run_full_1e9_all_algos_projected_all_envs.sh
-```
-
-Defaults in `scripts/run_full_1e9_all_algos_projected_all_envs.sh`:
-
-- environments: `toyexample,E1,E2,...,E10`
-- `n_steps=1000000000`
-- `n_runs=48`
-- `threads=48`
-- schedules: `theory,theory_log2,inv_t,inv_sqrt_t,inv_t_2_3,inv_omega_t,constant_omega,constant`
-- projections: `none,oracle,upper`
-- scale grid (`base_values`): `1e-5` to `1e3` with half-decade spacing (17 values, shared across all schedules/projections)
-- output root: `td_cxx_logs_full_1e9_all_algos_projected_nonzero_theta`
-
-Total sweep size:
-
-- per environment: `17 * 8 * 3 = 408` combinations
-- full run (`toyexample + E1..E10`): `11 * 408 = 4488` combinations
-- total MC trajectories: `4488 * 48 = 215424`
-
-Progress monitor:
-
-```bash
-scripts/monitor_full_run_progress.py \
-  --root /home/leew0a/codex/TDfullexperiments/td_cxx_logs_full_1e9_all_algos_projected_nonzero_theta
-```
-
-## Julia vs C++ Approximation Check
+- exactness comes before speed
+- performance changes are acceptable only if they preserve baseline outputs
+- if a speed optimization breaks `manifest.tsv`, `runs_case_*.csv`, or `agg_case_*.csv` exactness, it should not be kept as the default implementation
 
-To verify Julia and C++ produce close results on matched settings, run a verification slice:
+Recent exactness-preserving benchmark results:
 
-```bash
-# 1) C++ slice (same env set, 48 runs, smaller steps for practical turnaround)
-BASE_VALUES='1e-5,1e-3,1e-1,1,1e3' \
-N_STEPS=200000 \
-N_RUNS=48 \
-THREADS=48 \
-OUT_ROOT=td_cxx_logs_verify48 \
-./scripts/run_full_1e7_theory_all_envs.sh
+- `analysis/perf_exact_vs_baseline_1e6_c9_20260412.md`
+  - `1e6` steps, `11` env families, `4` omega cases, `8` schedules, `3` projections, `9` `c` values, `40` runs
+  - overall speedup: about `3.0x`
+- `analysis/final_exact_revalidation_20260412.md`
+  - full exactness revalidation after optimization and debugging
 
-# 2) Julia compact summary
-julia -t auto --project=.julia_env scripts/julia_theory_summary.jl \
-  --n_steps 200000 \
-  --n_runs 48 \
-  --c_values 1e-5,1e-3,1e-1,1,1e3 \
-  --out verification/julia_theory_summary_48.tsv
+## Julia Reference Path
 
-# 3) Extract C++ compact summary
-python3 scripts/extract_cpp_theory_summary.py \
-  --root td_cxx_logs_verify48 \
-  --out verification/cpp_theory_summary_48.tsv
+Legacy Julia code remains in the repository for:
 
-# 4) Compare tables
-python3 scripts/compare_cpp_julia_summary.py \
-  --cpp verification/cpp_theory_summary_48.tsv \
-  --julia verification/julia_theory_summary_48.tsv \
-  --out verification/cpp_vs_julia_compare_48.tsv
-```
+- comparison to the historical implementation
+- theory-summary extraction
+- reproducibility with older result folders
 
-Current comparison snapshot after RNG alignment (legacy 13-env artifact `verification/cpp_vs_julia_compare_48_rng.tsv`, 65 matched rows):
+Main Julia files:
 
-- maxima:
-  - `omega_rel_max=2.1713e-12`
-  - `kappa_rel_max=1.5998e-12`
-  - `finalD_rel_max=0`
-  - `finalA_rel_max=0`
-  - `div_abs_max=0`
+- `TDThreshold.jl`
+- `td_threshold_theory_sweep.jl`
+- `plot_divergence.jl`
+- `generate_run_reports.jl`
 
-Interpretation notes:
+Use Julia only when you explicitly need legacy behavior or Julia-vs-C++ comparison. For new experiments, prefer C++.
 
-- Julia/C++ now use the same deterministic `SplitMix64` RNG stream and identical seed-mixing formula.
-- aggregation excludes non-finite checkpoints in both implementations, so divergence handling is aligned.
+## Verification and Study Documents
 
-## Full Julia vs C++ Check (1e7, 48 runs, 11 envs, 17 scales)
+Useful checked-in documents:
 
-Full comparison command set:
+- `verification/summary_instance.md`
+- `verification/detailed_td_instance_report_20260403.md`
+- `verification/td_instance_summary_corrected_20260404.md`
+- `plottable.md`
+- `analysis/no_projection_theory_review_20260410.md`
+- `analysis/no_projection_theory_summary_tables_20260410.md`
 
-```bash
-# C++ full sweep
-N_STEPS=10000000 N_RUNS=48 THREADS=48 OUT_ROOT=td_cxx_logs_full_1e7_rng \
-./scripts/run_full_1e7_theory_all_envs.sh
+These files summarize instance definitions, plotting plans, and experiment conclusions.
 
-# Julia full summary
-julia -t auto --project=.julia_env scripts/julia_theory_summary.jl \
-  --n_steps 10000000 \
-  --n_runs 48 \
-  --c_values 1e-5,3.16227766017e-5,1e-4,3.16227766017e-4,1e-3,3.16227766017e-3,1e-2,3.16227766017e-2,1e-1,3.16227766017e-1,1,3.16227766017,1e1,3.16227766017e1,1e2,3.16227766017e2,1e3 \
-  --out verification/julia_theory_summary_1e7_48_rng.tsv
+## Minimal Maintenance Checklist
 
-# Extract + compare
-python3 scripts/extract_cpp_theory_summary.py \
-  --root td_cxx_logs_full_1e7_rng \
-  --out verification/cpp_theory_summary_1e7_48_rng.tsv
-python3 scripts/compare_cpp_julia_summary.py \
-  --cpp verification/cpp_theory_summary_1e7_48_rng.tsv \
-  --julia verification/julia_theory_summary_1e7_48_rng.tsv \
-  --out verification/cpp_vs_julia_compare_1e7_48_rng.tsv
-```
+When changing the C++ engine:
 
-Expected rows with the current 11-env default are `11 * 17 = 187`.
-The checked-in comparison artifact is currently the legacy 13-env file (`verification/cpp_vs_julia_compare_1e7_48_rng.tsv`, 221 rows), with maxima:
-
-- `omega_rel_max=2.1713e-12`
-- `kappa_rel_max=1.5998e-12`
-- `finalD_rel_max=1.6117e-10`
-- `finalA_rel_max=2.2288e-10`
-- `div_abs_max=0`
-
-These are floating-point roundoff scale differences (absolute error up to about `1e-15`), not algorithmic mismatches.
-
-# Legacy Julia Usage (Reference)
-
-Finite-state Julia implementation of semi-gradient TD(0) with a generic environment layer.
-
-The repo now supports:
-
-- the original `toyexample` setup
-- candidate environments `E1` through `E10` (renumbered after removing legacy `E3` and `E7`) from [example.md](./example.md)
-- fixed parameters via `--set key=value`
-- parameter sweeps via `--sweep key=v1,v2,...`
-- manifest-driven plotting for new runs while keeping legacy filename parsing for old result folders
-- static HTML reports with TD-instance summaries and inline plots
-
-## Requirements
-
-- Julia 1.11.8
-- Optional for plots and PNG export: PyPlot.jl
-
-Install PyPlot once if you want EPS plots, PNG companions, or HTML reports that auto-fill missing PNGs:
-
-```bash
-julia -e "using Pkg; Pkg.add(\"PyPlot\")"
-```
-
-## Files
-
-- `TDThreshold.jl`: Core types, generic finite-state environments, and builders for `toyexample` + `E1..E10`
-- `td_threshold_theory_sweep.jl`: CLI runner for theory-schedule `c` sweeps across environment cases
-- `plot_divergence.jl`: Plotting pipeline; prefers `manifest.tsv` for new runs and falls back to legacy filename parsing
-- `export_plots_png.jl`: Re-runs plotting and also saves PNG companions when possible
-- `generate_run_reports.jl`: Builds static HTML reports (`report.html`) for each run and a root `index.html`
-- `td_instance_report_overrides.jl`: Instance catalog and report layout overrides used by the HTML viewer
-- `example.md`: Environment definitions and the intended stress-test interpretations
-
-## Basic Usage
-
-Original toyexample workflow:
-
-```bash
-julia -t auto td_threshold_theory_sweep.jl --n_steps 10000000 --n_runs 48
-```
-
-This still defaults to the old toyexample scale sweep.
-
-Single non-toy environment case:
-
-```bash
-julia -t auto td_threshold_theory_sweep.jl \
-  --env E4 \
-  --set eps1=1e-3 \
-  --set eps2=1e-2 \
-  --set reward_mode=signed \
-  --c_values 1e0,1e2,1e4
-```
-
-Sweep an environment parameter:
-
-```bash
-julia -t auto td_threshold_theory_sweep.jl \
-  --env E9 \
-  --set m=64 \
-  --set alpha_max=1.57079632679 \
-  --sweep eps1=1e-2,1e-3,1e-4 \
-  --c_values 1e0,1e2,1e4
-```
-
-Write CSV and `manifest.tsv` only:
-
-```bash
-julia -t auto td_threshold_theory_sweep.jl \
-  --env E4 \
-  --set eps1=1e-3 \
-  --set eps2=1e-2 \
-  --skip_plots
-```
-
-## Outputs
-
-Each run directory contains:
-
-- aggregated CSV files per `(case, c)`
-- per-run CSV files per `(case, c)`
-- `manifest.tsv` describing the cases, parameter values, and file mappings
-- optionally `plots/` with EPS figures; omit plotting with `--skip_plots`
-
-Output directory behavior:
-
-- default base directory is `td_divergence_logs`
-- if `--outdir` is omitted, the runner writes to `td_divergence_logs/<env>_<timestamp>`
-- if `--outdir` is provided and its basename already starts with `<env>_`, it is treated as the final run directory
-- otherwise the runner still creates `--outdir/<env>_<timestamp>`
-
-## Plotting
-
-Re-render plots for an existing output directory:
-
-```bash
-julia plot_divergence.jl --dir td_divergence_logs/E4_YYYYMMDD_HHMMSS
-```
-
-Generated figures include:
-
-- per-case final analysis plots
-- learning-curve grids for the `D` and `A` objectives
-- full and compact grid summaries
-- best-curve overlays across cases
-
-Generate PNG companions for an existing run:
-
-```bash
-julia export_plots_png.jl td_divergence_logs/E4_YYYYMMDD_HHMMSS
-```
-
-## HTML Reports
-
-Build a static local viewer for all runs under `td_divergence_logs`:
-
-```bash
-julia generate_run_reports.jl --root td_divergence_logs
-```
-
-This generates:
-
-- `td_divergence_logs/index.html`: grouped run index
-- `<run_dir>/report.html`: per-run report with inline images, parameter tables, and TD-instance summaries
-
-The report generator will try to create missing PNG files automatically by calling `export_plots_png.jl` when a run only has EPS plots.
+1. rebuild with `make -C cpp`
+2. run at least one smoke sweep with `./cpp/tdx sweep ...`
+3. if simulation semantics changed, re-run an exactness comparison against the known baseline
+4. if plotting code changed, regenerate at least one plot directory and one embedded report
+5. record benchmark or debugging results in `analysis/` if the change is substantive
