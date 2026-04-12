@@ -283,8 +283,13 @@ struct FiniteTDEnv {
     int d = 0;
     std::vector<double> P;
     std::vector<double> P_cdf;
+    std::vector<int> P_support_offsets;
+    std::vector<int> P_support_indices;
+    std::vector<double> P_support_cdf;
+    std::vector<double> reward_support;
     std::vector<double> D;
     std::vector<double> Phi;
+    std::vector<double> phi_row_sq;
     std::vector<double> theta_star;
     std::vector<double> V_star;
     std::vector<double> r;
@@ -710,12 +715,14 @@ static FiniteTDEnv finalize_environment(
     }
 
     double phi_max_sq = 0.0;
+    std::vector<double> phi_row_sq(static_cast<size_t>(n), 0.0);
     for (int s = 0; s < n; ++s) {
         double acc = 0.0;
         for (int j = 0; j < d; ++j) {
             const double v = Phi[idx2(s, j, d)];
             acc += v * v;
         }
+        phi_row_sq[static_cast<size_t>(s)] = acc;
         phi_max_sq = std::max(phi_max_sq, acc);
     }
 
@@ -734,6 +741,34 @@ static FiniteTDEnv finalize_environment(
         P_cdf[idx2(i, n - 1, n)] = 1.0;
     }
 
+    std::vector<int> P_support_offsets(static_cast<size_t>(n + 1), 0);
+    std::vector<int> P_support_indices;
+    std::vector<double> P_support_cdf;
+    std::vector<double> reward_support;
+    P_support_indices.reserve(P.size());
+    P_support_cdf.reserve(P.size());
+    reward_support.reserve(P.size());
+    int support_cursor = 0;
+    for (int i = 0; i < n; ++i) {
+        P_support_offsets[static_cast<size_t>(i)] = support_cursor;
+        double csum = 0.0;
+        for (int j = 0; j < n; ++j) {
+            const double pij = P[idx2(i, j, n)];
+            if (pij <= 0.0) {
+                continue;
+            }
+            csum += pij;
+            P_support_indices.push_back(j);
+            P_support_cdf.push_back(csum);
+            reward_support.push_back(r[idx2(i, j, n)]);
+            support_cursor += 1;
+        }
+        if (support_cursor > P_support_offsets[static_cast<size_t>(i)]) {
+            P_support_cdf[static_cast<size_t>(support_cursor - 1)] = 1.0;
+        }
+    }
+    P_support_offsets[static_cast<size_t>(n)] = support_cursor;
+
     FiniteTDEnv env;
     env.env_id = env_id;
     env.display_name = display_name;
@@ -742,8 +777,13 @@ static FiniteTDEnv finalize_environment(
     env.d = d;
     env.P = std::move(P);
     env.P_cdf = std::move(P_cdf);
+    env.P_support_offsets = std::move(P_support_offsets);
+    env.P_support_indices = std::move(P_support_indices);
+    env.P_support_cdf = std::move(P_support_cdf);
+    env.reward_support = std::move(reward_support);
     env.D = std::move(D);
     env.Phi = std::move(Phi);
+    env.phi_row_sq = std::move(phi_row_sq);
     env.theta_star = std::move(theta_star);
     env.V_star = std::move(V_star);
     env.r = std::move(r);
@@ -1395,6 +1435,57 @@ static double projection_radius(const FiniteTDEnv &env, const ObjectiveMatrices 
     return 2.0 * env.r_max / denom;
 }
 
+struct AlphaRuntime {
+    double c = 1.0;
+    double phi_max_sq = 1.0;
+    double omega = 1.0;
+    double log_n_steps = 1.0;
+    double t0 = 0.0;
+};
+
+static AlphaRuntime make_alpha_runtime(
+    const AlgorithmSpec &spec,
+    const FiniteTDEnv &env,
+    const ObjectiveMatrices &metrics,
+    const int n_steps,
+    const double t0
+) {
+    AlphaRuntime rt;
+    rt.c = std::max(spec.param, 1e-16);
+    rt.phi_max_sq = std::max(env.phi_max_sq, 1e-12);
+    rt.omega = std::max(metrics.omega, 1e-12);
+    rt.log_n_steps = std::max(std::log(static_cast<double>(n_steps)), 1.0);
+    rt.t0 = t0;
+    return rt;
+}
+
+template <ScheduleType S>
+static inline double alpha_t_compiled(const AlphaRuntime &rt, const int t) {
+    if constexpr (S == ScheduleType::Theory) {
+        const double denom = rt.c * rt.phi_max_sq * rt.log_n_steps * std::log(static_cast<double>(t) + 3.0) *
+                             std::sqrt(static_cast<double>(t) + 1.0);
+        return 1.0 / std::max(denom, 1e-16);
+    } else if constexpr (S == ScheduleType::TheoryLog2) {
+        const double log_term = std::log(static_cast<double>(t) + 3.0);
+        const double denom = rt.c * rt.phi_max_sq * log_term * log_term * std::sqrt(static_cast<double>(t) + 1.0);
+        return 1.0 / std::max(denom, 1e-16);
+    } else if constexpr (S == ScheduleType::ConstantOmega) {
+        return rt.omega / rt.c;
+    } else if constexpr (S == ScheduleType::Constant) {
+        return 1.0 / rt.c;
+    } else if constexpr (S == ScheduleType::InvT) {
+        return 1.0 / (rt.c * std::max(1.0, static_cast<double>(t) + rt.t0));
+    } else if constexpr (S == ScheduleType::InvSqrtT) {
+        return 1.0 / (rt.c * std::sqrt(std::max(1.0, static_cast<double>(t) + rt.t0)));
+    } else if constexpr (S == ScheduleType::InvTwoThirdsT) {
+        return 1.0 / (rt.c * std::pow(std::max(1.0, static_cast<double>(t) + rt.t0), 2.0 / 3.0));
+    } else if constexpr (S == ScheduleType::InvOmegaT) {
+        const double denom = rt.c * rt.omega * std::max(1.0, static_cast<double>(t) + rt.t0);
+        return 1.0 / std::max(denom, 1e-16);
+    }
+    return 1.0 / rt.c;
+}
+
 static double alpha_t(
     const AlgorithmSpec &spec,
     const FiniteTDEnv &env,
@@ -1403,34 +1494,18 @@ static double alpha_t(
     const int n_steps,
     const double t0
 ) {
-    const double c = std::max(spec.param, 1e-16);
+    const AlphaRuntime rt = make_alpha_runtime(spec, env, metrics, n_steps, t0);
     switch (spec.schedule) {
-        case ScheduleType::Theory: {
-            const double denom = c * std::max(env.phi_max_sq, 1e-12) * std::max(std::log(static_cast<double>(n_steps)), 1.0) *
-                                 std::log(static_cast<double>(t) + 3.0) * std::sqrt(static_cast<double>(t) + 1.0);
-            return 1.0 / std::max(denom, 1e-16);
-        }
-        case ScheduleType::TheoryLog2: {
-            const double log_term = std::log(static_cast<double>(t) + 3.0);
-            const double denom = c * std::max(env.phi_max_sq, 1e-12) * log_term * log_term * std::sqrt(static_cast<double>(t) + 1.0);
-            return 1.0 / std::max(denom, 1e-16);
-        }
-        case ScheduleType::ConstantOmega:
-            return std::max(metrics.omega, 1e-12) / c;
-        case ScheduleType::Constant:
-            return 1.0 / c;
-        case ScheduleType::InvT:
-            return 1.0 / (c * std::max(1.0, static_cast<double>(t) + t0));
-        case ScheduleType::InvSqrtT:
-            return 1.0 / (c * std::sqrt(std::max(1.0, static_cast<double>(t) + t0)));
-        case ScheduleType::InvTwoThirdsT:
-            return 1.0 / (c * std::pow(std::max(1.0, static_cast<double>(t) + t0), 2.0 / 3.0));
-        case ScheduleType::InvOmegaT: {
-            const double denom = c * std::max(metrics.omega, 1e-12) * std::max(1.0, static_cast<double>(t) + t0);
-            return 1.0 / std::max(denom, 1e-16);
-        }
+        case ScheduleType::Theory: return alpha_t_compiled<ScheduleType::Theory>(rt, t);
+        case ScheduleType::TheoryLog2: return alpha_t_compiled<ScheduleType::TheoryLog2>(rt, t);
+        case ScheduleType::ConstantOmega: return alpha_t_compiled<ScheduleType::ConstantOmega>(rt, t);
+        case ScheduleType::Constant: return alpha_t_compiled<ScheduleType::Constant>(rt, t);
+        case ScheduleType::InvT: return alpha_t_compiled<ScheduleType::InvT>(rt, t);
+        case ScheduleType::InvSqrtT: return alpha_t_compiled<ScheduleType::InvSqrtT>(rt, t);
+        case ScheduleType::InvTwoThirdsT: return alpha_t_compiled<ScheduleType::InvTwoThirdsT>(rt, t);
+        case ScheduleType::InvOmegaT: return alpha_t_compiled<ScheduleType::InvOmegaT>(rt, t);
     }
-    return 1.0 / c;
+    return 1.0 / rt.c;
 }
 
 static uint64_t stable_seed(const double x, const int run_idx, const uint64_t salt = 0ULL) {
@@ -1439,6 +1514,12 @@ static uint64_t stable_seed(const double x, const int run_idx, const uint64_t sa
     const uint64_t b = static_cast<uint64_t>(run_idx);
     const uint64_t z = (bits * 0x9E3779B97F4A7C15ULL) ^ (b * 0xD2B74407B1CE6E93ULL) ^ salt ^ 0x94D049BB133111EBULL;
     return (z % 0x7fffffffULL) + 1ULL;
+}
+
+static inline bool is_finite_strict(const double x) {
+    uint64_t bits = 0ULL;
+    std::memcpy(&bits, &x, sizeof(double));
+    return (bits & 0x7ff0000000000000ULL) != 0x7ff0000000000000ULL;
 }
 
 struct RunResult {
@@ -1473,6 +1554,27 @@ struct AggregateResult {
     double divergence_rate = 0.0;
 };
 
+struct RunningStat {
+    int count = 0;
+    double mean = 0.0;
+    double m2 = 0.0;
+
+    void add(const double x) {
+        count += 1;
+        const double delta = x - mean;
+        mean += delta / static_cast<double>(count);
+        const double delta2 = x - mean;
+        m2 += delta * delta2;
+    }
+
+    double stddev() const {
+        if (count <= 0) {
+            return 0.0;
+        }
+        return std::sqrt(std::max(0.0, m2 / static_cast<double>(count)));
+    }
+};
+
 static std::vector<int> checkpoint_indices(const int n_steps, const int dense_prefix = 100, const double log_step_decades = 0.01) {
     if (n_steps < 1) {
         return {};
@@ -1504,19 +1606,51 @@ static std::vector<int> checkpoint_indices(const int n_steps, const int dense_pr
 
 static std::pair<int, double> sample_step(const FiniteTDEnv &env, const int s, SplitMix64Rng &rng) {
     const double u = rng.next_unit();
-    const int row_off = s * env.n_states;
-    int s_next = env.n_states - 1;
-    for (int j = 0; j < env.n_states; ++j) {
-        if (u <= env.P_cdf[static_cast<size_t>(row_off + j)]) {
-            s_next = j;
+    const int begin = env.P_support_offsets[static_cast<size_t>(s)];
+    const int end = env.P_support_offsets[static_cast<size_t>(s + 1)];
+    int pick = end - 1;
+    for (int k = begin; k < end; ++k) {
+        if (u <= env.P_support_cdf[static_cast<size_t>(k)]) {
+            pick = k;
             break;
         }
     }
-    const double reward = env.r[idx2(s, s_next, env.n_states)];
+    const int s_next = env.P_support_indices[static_cast<size_t>(pick)];
+    const double reward = env.reward_support[static_cast<size_t>(pick)];
     return {s_next, reward};
 }
 
-static RunResult run_single_simulation(
+static double quadratic_objective(
+    const std::vector<double> &theta,
+    const std::vector<double> &G,
+    const std::vector<double> &b,
+    const double c,
+    const int d
+) {
+    double q = 0.0;
+    for (int i = 0; i < d; ++i) {
+        double acc = 0.0;
+        const int row_off = i * d;
+        for (int j = 0; j < d; ++j) {
+            acc += G[static_cast<size_t>(row_off + j)] * theta[static_cast<size_t>(j)];
+        }
+        q += theta[static_cast<size_t>(i)] * acc;
+    }
+    return q - 2.0 * std::inner_product(theta.begin(), theta.end(), b.begin(), 0.0) + c;
+}
+
+using RunSimulationFn = RunResult (*)(
+    const AlgorithmSpec &,
+    int,
+    int,
+    const std::vector<int> &,
+    const FiniteTDEnv &,
+    const ObjectiveMatrices &,
+    double
+);
+
+template <ScheduleType S, ProjectionType P>
+static RunResult run_single_simulation_impl(
     const AlgorithmSpec &spec,
     const int run_idx,
     const int n_steps,
@@ -1541,37 +1675,43 @@ static RunResult run_single_simulation(
 
     const double proj_R = projection_radius(env, metrics, spec.projection);
     const double proj_R2 = std::isfinite(proj_R) ? proj_R * proj_R : std::numeric_limits<double>::infinity();
+    const bool projection_enabled = std::isfinite(proj_R) && proj_R > 0.0;
 
     int s = env.start_state;
     int cp_idx = 0;
+    double theta_n2 = 0.0;
 
     for (int t = 1; t <= n_steps; ++t) {
         const auto [s_next, reward] = sample_step(env, s, rng);
+        const double *phi_s = env.Phi.data() + static_cast<size_t>(s) * static_cast<size_t>(d);
+        const double *phi_next = env.Phi.data() + static_cast<size_t>(s_next) * static_cast<size_t>(d);
 
         double dot_phi = 0.0;
         double dot_phi_next = 0.0;
         for (int j = 0; j < d; ++j) {
             const double wj = w[static_cast<size_t>(j)];
-            dot_phi += wj * env.Phi[idx2(s, j, d)];
-            dot_phi_next += wj * env.Phi[idx2(s_next, j, d)];
+            dot_phi += wj * phi_s[static_cast<size_t>(j)];
+            dot_phi_next += wj * phi_next[static_cast<size_t>(j)];
         }
         const double delta = reward + env.gamma * dot_phi_next - dot_phi;
 
         const double alpha = alpha_t(spec, env, metrics, t, n_steps, t0);
         res.max_alpha = std::max(res.max_alpha, alpha);
+        const double beta = alpha * delta;
 
         for (int j = 0; j < d; ++j) {
-            w[static_cast<size_t>(j)] += alpha * delta * env.Phi[idx2(s, j, d)];
+            w[static_cast<size_t>(j)] += beta * phi_s[static_cast<size_t>(j)];
         }
+        theta_n2 = std::inner_product(w.begin(), w.end(), w.begin(), 0.0);
 
-        if (spec.projection != ProjectionType::None && std::isfinite(proj_R) && proj_R > 0.0) {
-            double n2 = std::inner_product(w.begin(), w.end(), w.begin(), 0.0);
-            if (n2 > proj_R2 && std::isfinite(n2)) {
-                const double nrm = std::sqrt(n2);
+        if constexpr (P != ProjectionType::None) {
+            if (projection_enabled && theta_n2 > proj_R2 && std::isfinite(theta_n2)) {
+                const double nrm = std::sqrt(theta_n2);
                 const double scale = proj_R / std::max(nrm, 1e-16);
                 for (double &wv : w) {
                     wv *= scale;
                 }
+                theta_n2 = std::inner_product(w.begin(), w.end(), w.begin(), 0.0);
                 res.proj_clip_count += 1;
             }
         }
@@ -1582,37 +1722,20 @@ static RunResult run_single_simulation(
             theta_bar[static_cast<size_t>(j)] += (wj - theta_bar[static_cast<size_t>(j)]) * inv_t;
         }
 
-        double q = 0.0;
-        for (int i = 0; i < d; ++i) {
-            double acc = 0.0;
-            for (int j = 0; j < d; ++j) {
-                acc += metrics.G[idx2(i, j, d)] * theta_bar[static_cast<size_t>(j)];
-            }
-            q += theta_bar[static_cast<size_t>(i)] * acc;
-        }
-        const double vbar = q - 2.0 * std::inner_product(theta_bar.begin(), theta_bar.end(), metrics.b.begin(), 0.0) + metrics.c;
-
-        double qA = 0.0;
-        for (int i = 0; i < d; ++i) {
-            double accA = 0.0;
-            for (int j = 0; j < d; ++j) {
-                accA += metrics.G_A[idx2(i, j, d)] * theta_bar[static_cast<size_t>(j)];
-            }
-            qA += theta_bar[static_cast<size_t>(i)] * accA;
-        }
-        const double vbarA = qA - 2.0 * std::inner_product(theta_bar.begin(), theta_bar.end(), metrics.b_A.begin(), 0.0) + metrics.c_A;
-
-        const double theta_n2 = std::inner_product(w.begin(), w.end(), w.begin(), 0.0);
         res.max_theta_norm = std::max(res.max_theta_norm, theta_n2);
-        res.final_vbar = vbar;
-        res.final_vbar_A = vbarA;
         res.final_theta_norm = theta_n2;
 
-        while (cp_idx < n_cp && checkpoints[static_cast<size_t>(cp_idx)] == t) {
-            res.vbar_errs[static_cast<size_t>(cp_idx)] = vbar;
-            res.vbar_errs_A[static_cast<size_t>(cp_idx)] = vbarA;
-            res.theta_norms[static_cast<size_t>(cp_idx)] = theta_n2;
-            cp_idx += 1;
+        if (cp_idx < n_cp && checkpoints[static_cast<size_t>(cp_idx)] == t) {
+            const double vbar = quadratic_objective(theta_bar, metrics.G, metrics.b, metrics.c, d);
+            const double vbarA = quadratic_objective(theta_bar, metrics.G_A, metrics.b_A, metrics.c_A, d);
+            res.final_vbar = vbar;
+            res.final_vbar_A = vbarA;
+            while (cp_idx < n_cp && checkpoints[static_cast<size_t>(cp_idx)] == t) {
+                res.vbar_errs[static_cast<size_t>(cp_idx)] = vbar;
+                res.vbar_errs_A[static_cast<size_t>(cp_idx)] = vbarA;
+                res.theta_norms[static_cast<size_t>(cp_idx)] = theta_n2;
+                cp_idx += 1;
+            }
         }
 
         if (!(theta_n2 < kDivergenceThreshold) || !std::isfinite(theta_n2)) {
@@ -1632,8 +1755,31 @@ static RunResult run_single_simulation(
 
         s = s_next;
     }
-
     return res;
+}
+
+template <ScheduleType S>
+static RunSimulationFn select_projection_run_simulation_fn(const ProjectionType p) {
+    switch (p) {
+        case ProjectionType::None: return &run_single_simulation_impl<S, ProjectionType::None>;
+        case ProjectionType::Oracle: return &run_single_simulation_impl<S, ProjectionType::Oracle>;
+        case ProjectionType::Upper: return &run_single_simulation_impl<S, ProjectionType::Upper>;
+    }
+    return &run_single_simulation_impl<S, ProjectionType::None>;
+}
+
+static RunSimulationFn select_run_simulation_fn(const AlgorithmSpec &spec) {
+    switch (spec.schedule) {
+        case ScheduleType::Theory: return select_projection_run_simulation_fn<ScheduleType::Theory>(spec.projection);
+        case ScheduleType::TheoryLog2: return select_projection_run_simulation_fn<ScheduleType::TheoryLog2>(spec.projection);
+        case ScheduleType::ConstantOmega: return select_projection_run_simulation_fn<ScheduleType::ConstantOmega>(spec.projection);
+        case ScheduleType::Constant: return select_projection_run_simulation_fn<ScheduleType::Constant>(spec.projection);
+        case ScheduleType::InvT: return select_projection_run_simulation_fn<ScheduleType::InvT>(spec.projection);
+        case ScheduleType::InvSqrtT: return select_projection_run_simulation_fn<ScheduleType::InvSqrtT>(spec.projection);
+        case ScheduleType::InvTwoThirdsT: return select_projection_run_simulation_fn<ScheduleType::InvTwoThirdsT>(spec.projection);
+        case ScheduleType::InvOmegaT: return select_projection_run_simulation_fn<ScheduleType::InvOmegaT>(spec.projection);
+    }
+    return select_projection_run_simulation_fn<ScheduleType::Theory>(spec.projection);
 }
 
 static AggregateResult aggregate_results(
@@ -2346,6 +2492,7 @@ static int run(const RunnerConfig &cfg) {
                     std::string sched_str = schedule_name(sched);
                     std::string proj_str = projection_name(proj);
                     std::cout << "  schedule=" << sched_str << ", projection=" << proj_str << ", c=" << param << " ..." << std::flush;
+                    const RunSimulationFn run_sim_fn = select_run_simulation_fn(spec);
 
                     std::vector<RunResult> runs(static_cast<size_t>(cfg.n_runs));
 
@@ -2353,7 +2500,8 @@ static int run(const RunnerConfig &cfg) {
 #pragma omp parallel for schedule(static)
 #endif
                     for (int run_idx = 0; run_idx < cfg.n_runs; ++run_idx) {
-                        runs[static_cast<size_t>(run_idx)] = run_single_simulation(spec, run_idx + 1, cfg.n_steps, checkpoints, env, metrics, cfg.t0);
+                        runs[static_cast<size_t>(run_idx)] =
+                            run_sim_fn(spec, run_idx + 1, cfg.n_steps, checkpoints, env, metrics, cfg.t0);
                     }
 
                     AggregateResult agg = aggregate_results(runs, checkpoints, spec, env, metrics, cfg.n_steps, cfg.t0);
