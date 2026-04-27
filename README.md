@@ -32,6 +32,7 @@ This version keeps outputs byte-identical to the earlier stable baseline on the 
 - `scripts/run_full_*.sh`: checked-in experiment launchers
 - `analysis/`: debugging, benchmarking, and exactness reports
 - `verification/`: instance summaries, comparison tables, and verification artifacts
+- `UBIQUITOUS_LANGUAGE.md`: canonical experiment-domain vocabulary
 - `configs/`: example config-driven sweeps
 - `README.md`: human-oriented repo guide
 - `AGENTS.md`: repo-local instructions for Codex and future maintenance
@@ -180,6 +181,36 @@ Recent exactness-preserving benchmark results:
 - `analysis/final_exact_revalidation_20260412.md`
   - full exactness revalidation after optimization and debugging
 
+## Exactness Gate
+
+Use the public-interface gate before and after C++ refactors or performance work:
+
+```bash
+python3 scripts/verify_exactness_gate.py
+```
+
+By default this runs `./cpp/tdx` twice on the hard representative families `toyexample,E10` and checks that generated `manifest.tsv`, `runs_case_*.csv`, and `agg_case_*.csv` files are byte-identical.
+
+To compare two binaries:
+
+```bash
+python3 scripts/verify_exactness_gate.py \
+  --baseline-bin /path/to/baseline/tdx \
+  --candidate-bin ./cpp/tdx
+```
+
+To include the plot/report path on the first candidate run:
+
+```bash
+python3 scripts/verify_exactness_gate.py --plot-check
+```
+
+Useful design and verification notes:
+
+- `analysis/exactness_risk_review_20260427.md`
+- `analysis/deep_module_refactor_map_20260427.md`
+- `UBIQUITOUS_LANGUAGE.md`
+
 ## Julia Reference Path
 
 Legacy Julia code remains in the repository for:
@@ -215,7 +246,7 @@ These files summarize instance definitions, plotting plans, and experiment concl
 When changing the C++ engine:
 
 1. rebuild with `make -C cpp`
-2. run at least one smoke sweep with `./cpp/tdx sweep ...`
+2. run `python3 scripts/verify_exactness_gate.py`
 3. if simulation semantics changed, re-run an exactness comparison against the known baseline
 4. if plotting code changed, regenerate at least one plot directory and one embedded report
 5. record benchmark or debugging results in `analysis/` if the change is substantive

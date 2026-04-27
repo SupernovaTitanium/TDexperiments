@@ -21,6 +21,8 @@
 #include <utility>
 #include <vector>
 
+#include "tdx_output_contract.hpp"
+
 #ifdef _OPENMP
 #include <omp.h>
 #endif
@@ -2296,7 +2298,7 @@ static void write_aggregated_csv(
     if (!out) {
         throw std::runtime_error("Failed to write " + path.string());
     }
-    out << "timestep,E_D[||Vbar_t - V*||^2],E_A[||Vbar_t - V*||^2],E[||theta_t||^2],max_i<=T ||theta_i||^2,||theta^*||^2,std_D,std_A,std_max_theta,omega,kappa,lambda_sym,phi_max_sq,tau_proxy,gamma,alpha_mean,alpha_min,alpha_max\n";
+    out << output_contract::kAggregateCsvHeader << '\n';
 
     out << std::setprecision(12);
     for (size_t i = 0; i < agg.timesteps.size(); ++i) {
@@ -2327,7 +2329,7 @@ static void write_run_csv(const fs::path &path, const std::vector<RunResult> &ru
     if (!out) {
         throw std::runtime_error("Failed to write " + path.string());
     }
-    out << "run_idx,diverged,diverged_at,final_obj_D,final_obj_A,final_theta_norm,max_theta_norm,ratio_max_over_theta_star_sq,theta_star_norm_sq,max_alpha,max_proj_clip_count\n";
+    out << output_contract::kRunCsvHeader << '\n';
     out << std::setprecision(12);
 
     for (const auto &r : runs) {
@@ -2551,7 +2553,7 @@ static int run(const RunnerConfig &cfg) {
         if (!mf) {
             throw std::runtime_error("Failed to write manifest: " + manifest_path.string());
         }
-        mf << "case_id\tenv_id\tcase_slug\tcase_label\talgorithm\tschedule\tprojection\tprojection_radius\tparam_name\tparam_value\tagg_file\trun_file\tomega\tkappa\tlambda_sym\tphi_max_sq\ttau_proxy\tgamma\ttheta_star_norm\tr_max\tmetadata\n";
+        mf << output_contract::kManifestTsvHeader << '\n';
         for (const auto &r : manifest_rows) {
             mf << r.case_id << '\t'
                << r.env_id << '\t'

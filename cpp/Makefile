@@ -11,7 +11,7 @@ MIX_SRC := tdmix_kstep.cpp
 
 all: $(TARGET)
 
-$(TARGET): $(SRC)
+$(TARGET): $(SRC) tdx_output_contract.hpp
 	$(CXX) $(CXXFLAGS) -o $@ $< $(LDFLAGS)
 
 $(MIX_TARGET): $(MIX_SRC)

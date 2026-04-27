@@ -25,9 +25,12 @@ Core files:
 - `cpp/Makefile`: build flags and targets
 - `scripts/plot_suite_v2.py`: plotting source of truth for C++ outputs
 - `scripts/generate_embedded_report_v2.py`: embedded HTML report generator
+- `scripts/verify_exactness_gate.py`: public-interface exactness gate for refactors and performance work
+- `UBIQUITOUS_LANGUAGE.md`: canonical terminology for the experiment domain
 - `manifest.tsv` inside each run directory: plotting/report source of truth
 
 If a task touches semantics, read the current implementation in `cpp/tdx.cpp` before assuming behavior from older reports.
+Use `UBIQUITOUS_LANGUAGE.md` terms when writing new docs, reports, scripts, or plot explanations.
 
 ## Non-Negotiable Constraint: Exactness First
 
@@ -86,6 +89,20 @@ Representative exactness-preserving benchmark references:
 
 - `analysis/perf_exact_vs_baseline_1e6_c9_20260412.md`
 - `analysis/large_benchmark_all11_20260411.md`
+
+Exactness gate:
+
+```bash
+python3 scripts/verify_exactness_gate.py
+```
+
+Compare two binaries:
+
+```bash
+python3 scripts/verify_exactness_gate.py \
+  --baseline-bin /path/to/baseline/tdx \
+  --candidate-bin ./cpp/tdx
+```
 
 ## Plotting Environment
 
@@ -162,12 +179,18 @@ Do:
 Do all of the following:
 
 1. rebuild: `make -C cpp`
-2. run a smoke sweep
-3. compare current outputs against the known baseline on at least representative cases
+2. run `python3 scripts/verify_exactness_gate.py`
+3. compare current outputs against the known baseline on at least representative cases when a baseline binary/output is available
 4. if exactness is claimed, verify `manifest.tsv`, `runs_case_*.csv`, and `agg_case_*.csv`
 5. write a short report in `analysis/` if the debugging or benchmark work is substantive
 
 Hard representative cases for debugging are historically `toyexample` and `E10`.
+
+For plot/report changes, run:
+
+```bash
+python3 scripts/verify_exactness_gate.py --plot-check
+```
 
 ## Long Runs and Benchmarks
 
@@ -177,6 +200,12 @@ For checked-in final artifacts, use:
 
 - `analysis/` for benchmark/debugging reports
 - `verification/` for instance summaries and table-based comparisons
+
+Refactor guidance:
+
+- use `analysis/deep_module_refactor_map_20260427.md` as the current architecture map
+- use `analysis/exactness_risk_review_20260427.md` as the current correctness-risk checklist
+- do not split `cpp/tdx.cpp` hot-loop code before the exactness gate passes
 
 When reporting a benchmark, record:
 
