@@ -24,6 +24,8 @@ ALL_SCHEDULES = "theory,theory_log2,constant_omega,constant,inv_t,inv_sqrt_t,inv
 ALL_PROJECTIONS = "none,oracle,upper"
 DEFAULT_ENVS = "toyexample,E10"
 REPO_DANGEROUS_NAMES = {"", ".", ".."}
+WORK_ROOT_MARKER = ".tdx_exactness_gate_work_root"
+WORK_ROOT_MARKER_TEXT = "owned by scripts/verify_exactness_gate.py\n"
 
 ENV_EXTRA_ARGS: dict[str, list[str]] = {
     "toyexample": ["--set", "scale_factor=1.0", "--set", "seed=114514"],
@@ -54,7 +56,11 @@ def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Run and compare exactness gates for cpp/tdx")
     p.add_argument("--baseline-bin", default="./cpp/tdx", help="Reference tdx binary")
     p.add_argument("--candidate-bin", default="./cpp/tdx", help="Candidate tdx binary")
-    p.add_argument("--work-root", default="/tmp/tdx_exactness_gate", help="Temporary output root")
+    p.add_argument(
+        "--work-root",
+        default="/tmp/tdx_exactness_gate",
+        help="Temporary output root; existing directories must contain the gate marker file",
+    )
     p.add_argument("--envs", default=DEFAULT_ENVS, help="Comma-separated environment families")
     p.add_argument("--n-steps", type=int, default=1000, help="Steps per Monte Carlo run")
     p.add_argument("--n-runs", type=int, default=4, help="Monte Carlo runs per manifest row")
@@ -85,13 +91,52 @@ def canonical_env_id(value: str) -> str:
     return value.strip()
 
 
-def assert_safe_work_root(work_root: Path, repo_root: Path) -> None:
+def assert_safe_work_root_path(work_root: Path, repo_root: Path) -> None:
     resolved = work_root.resolve()
     home = Path.home().resolve()
     if resolved.name in REPO_DANGEROUS_NAMES:
         raise SystemExit(f"unsafe work-root: {resolved}")
     if resolved in {Path("/").resolve(), home, repo_root, repo_root.parent.resolve()}:
         raise SystemExit(f"refusing to clean dangerous work-root: {resolved}")
+
+
+def marker_path(work_root: Path) -> Path:
+    return work_root / WORK_ROOT_MARKER
+
+
+def has_gate_marker(work_root: Path) -> bool:
+    try:
+        return marker_path(work_root).read_text(encoding="utf-8") == WORK_ROOT_MARKER_TEXT
+    except OSError:
+        return False
+
+
+def write_gate_marker(work_root: Path) -> None:
+    marker_path(work_root).write_text(WORK_ROOT_MARKER_TEXT, encoding="utf-8")
+
+
+def prepare_work_root(work_root: Path, repo_root: Path, no_clean: bool) -> None:
+    assert_safe_work_root_path(work_root, repo_root)
+
+    if work_root.exists():
+        if not work_root.is_dir():
+            raise SystemExit(f"work-root exists but is not a directory: {work_root}")
+        if not has_gate_marker(work_root):
+            raise SystemExit(
+                f"refusing to use existing unmarked work-root: {work_root}\n"
+                f"Choose a new path or an existing directory containing {WORK_ROOT_MARKER}."
+            )
+        if not no_clean:
+            shutil.rmtree(work_root)
+
+    work_root.mkdir(parents=True, exist_ok=True)
+    write_gate_marker(work_root)
+
+
+def remove_work_root(work_root: Path) -> None:
+    if not has_gate_marker(work_root):
+        raise SystemExit(f"refusing to remove unmarked work-root: {work_root}")
+    shutil.rmtree(work_root)
 
 
 def run_cmd(cmd: list[str], cwd: Path, env: dict[str, str] | None = None) -> float:
@@ -223,10 +268,7 @@ def main() -> None:
         raise SystemExit(f"baseline binary not found: {baseline_bin}")
     if not candidate_bin.exists():
         raise SystemExit(f"candidate binary not found: {candidate_bin}")
-    assert_safe_work_root(work_root, repo_root)
-    if not args.no_clean and work_root.exists():
-        shutil.rmtree(work_root)
-    work_root.mkdir(parents=True, exist_ok=True)
+    prepare_work_root(work_root, repo_root, args.no_clean)
 
     envs = [canonical_env_id(x) for x in split_csv(args.envs)]
     if not envs:
@@ -267,7 +309,7 @@ def main() -> None:
     print("[gate] PASS: compared outputs are byte-identical")
     if not args.keep:
         print(f"[gate] removing {work_root}")
-        shutil.rmtree(work_root)
+        remove_work_root(work_root)
 
 
 if __name__ == "__main__":
